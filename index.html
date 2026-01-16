@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Battle Thunder - Client Authority (Fixed)</title>
+    <title>Battle Thunder - Respawn Fixed</title>
     <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
     <style>
         body { margin: 0; overflow: hidden; font-family: 'Courier New', Courier, monospace; background: #000; }
@@ -18,7 +18,7 @@
             flex-direction: column;
             align-items: center;
             justify-content: center;
-            z-index: 1000;
+            z-index: 2000;
             color: white;
         }
 
@@ -114,6 +114,7 @@
             top: 20px; left: 20px;
             pointer-events: none;
             display: none; /* Hidden until game starts */
+            z-index: 100;
         }
 
         .hud-box {
@@ -179,6 +180,7 @@
             border-radius: 4px;
             text-align: right;
             display: none;
+            z-index: 100;
         }
         
         .crash-msg {
@@ -194,7 +196,43 @@
             padding: 40px;
             border: 4px solid red;
             text-align: center;
-            z-index: 20;
+            z-index: 3000;
+        }
+
+        /* --- LEADERBOARD --- */
+        #leaderboard {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background: rgba(0, 0, 0, 0.7);
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            padding: 10px;
+            border-radius: 5px;
+            color: white;
+            font-family: 'Courier New', Courier, monospace;
+            display: none; /* Toggled by JS */
+            min-width: 200px;
+            z-index: 200; /* Ensure this is above canvas */
+            pointer-events: none;
+        }
+        #leaderboard table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        #leaderboard th {
+            text-align: left;
+            border-bottom: 1px solid #777;
+            padding-bottom: 5px;
+            color: #FFD700;
+            font-size: 14px;
+        }
+        #leaderboard td {
+            padding: 3px 0;
+            text-align: center;
+            font-size: 14px;
+        }
+        #leaderboard td:first-child {
+            text-align: left;
         }
     </style>
 </head>
@@ -225,6 +263,7 @@
         </div>
     </div>
 
+    <!-- HUD -->
     <div class="hud-container" id="hud-main">
         <div class="hud-box">
             <h1 id="hud-name">PLAYER</h1>
@@ -237,11 +276,31 @@
             
             <div class="radar" id="radar">
                 <div class="radar-center"></div>
-                </div>
+            </div>
         </div>
     </div>
 
-    <div id="crash-msg" class="crash-msg">CRITICAL FAILURE<br><span style="font-size:20px; color:white;" id="respawn-text">RESPAWNING...</span></div>
+    <!-- LEADERBOARD -->
+    <div id="leaderboard">
+        <table>
+            <thead>
+                <tr>
+                    <th>PILOT</th>
+                    <th>K</th>
+                    <th>D</th>
+                </tr>
+            </thead>
+            <tbody id="leaderboard-body">
+                <!-- Javascript will inject rows here -->
+            </tbody>
+        </table>
+    </div>
+
+    <!-- DEATH SCREEN -->
+    <div id="crash-msg" class="crash-msg">
+        <div id="death-reason" style="font-size:32px; color:red; margin-bottom:10px;">CRITICAL FAILURE</div>
+        <span style="font-size:20px; color:white;" id="respawn-text">RESPAWNING...</span>
+    </div>
 
     <div id="controls">
         <b style="color:#FFD700">CONTROLS:</b><br>
@@ -252,6 +311,7 @@
         <b style="color:red">[F] FIRE WEAPON</b><br>
     </div>
 
+    <!-- SHADERS -->
     <script type="x-shader/x-vertex" id="sky-vertex">
         varying vec3 vWorldPosition;
         void main() {
@@ -277,7 +337,6 @@
         varying vec2 vUv;
         varying vec3 vPos;
         varying vec3 vNormal;
-        float hash(vec2 p) { return fract(1e4 * sin(17.0 * p.x + p.y * 0.1) * (0.1 + abs(sin(p.y * 13.0 + p.x)))); }
         void main() {
             vUv = uv;
             vec3 pos = position;
@@ -495,11 +554,13 @@
                     }
                     
                     // 2. Process Incoming Hits (Client Authority)
-                    if (packet.data.hits && packet.data.hits.length > 0) {
+                    if (packet.data.hits && Array.isArray(packet.data.hits)) {
+                        const attackerId = Number(packet.data.idx); // Valid sender index
                         packet.data.hits.forEach(hit => {
                             const target = players.find(t => t.index === hit.targetIdx);
                             if(target && !target.isCrashed) {
-                                target.takeDamage(hit.dmg);
+                                // Assign damage attributing the Packet Sender as attacker
+                                target.takeDamage(hit.dmg, attackerId);
                             }
                         });
                     }
@@ -654,6 +715,14 @@
                 this.flashTimer = 0;
                 this.prevShootState = false;
                 
+                // Stats
+                this.kills = 0;
+                this.deaths = 0;
+                this.lastAttackerName = null;
+
+                // Respawn Loop Fix: Track when we last respawned
+                this.lastRespawnTime = 0;
+
                 // Interpolation Buffer for Remote Players
                 this.positionBuffer = [];
 
@@ -752,17 +821,42 @@
                 explosions.push(new Explosion(this.mesh.position, 0xffaa00));
                 
                 if(this.index === myPlayerIndex) {
+                    const el = document.getElementById('death-reason');
+                    if(this.lastAttackerName) {
+                        el.innerText = `SHOT DOWN BY ${this.lastAttackerName}`;
+                    } else {
+                        el.innerText = "CRITICAL FAILURE";
+                    }
                     document.getElementById('crash-msg').style.display = 'block';
                 }
             }
 
-            takeDamage(amount) {
-                // Host authoritative damage (collisions, etc)
+            takeDamage(amount, attackerIdx) {
                 if(!isHost) return; 
                 if(this.isCrashed) return;
+                
+                const wasAlive = this.hp > 0;
                 this.hp -= amount;
-                if(this.hp <= 0) {
+                
+                // Only grant kill if they were alive BEFORE this specific shot, and dead AFTER
+                if(wasAlive && this.hp <= 0) {
                     this.hp = 0;
+                    this.isCrashed = true; // Set crashed immediately on Host
+                    this.deaths++;
+                    
+                    // Assign Kill - Strict Type Checking
+                    let validAttacker = Number(attackerIdx);
+                    
+                    if (!isNaN(validAttacker) && validAttacker >= 0 && validAttacker !== this.index) {
+                        const attacker = players.find(p => p.index === validAttacker);
+                        if (attacker) {
+                            attacker.kills++;
+                            this.lastAttackerName = attacker.name;
+                        }
+                    } else {
+                        this.lastAttackerName = null;
+                    }
+
                     this.explode();
                 }
             }
@@ -776,10 +870,15 @@
                 this.throttle = 0;
                 this.hp = 100;
                 this.isCrashed = false;
+                this.lastAttackerName = null;
                 this.mesh.visible = true;
                 this.radarBlip.style.display = 'block';
                 this.engineSound.restart();
-                this.buffer = []; // Clear buffer on reset
+                this.positionBuffer = []; 
+                
+                // FIX: Update lastRespawnTime to current time to create an "immunity window"
+                this.lastRespawnTime = Date.now();
+                
                 if(this.index === myPlayerIndex) document.getElementById('crash-msg').style.display = 'none';
             }
 
@@ -846,25 +945,63 @@
                 // Terrain Collision
                 const tH = getTerrainHeight(this.mesh.position.x, this.mesh.position.z);
                 if (this.mesh.position.y < tH + 2 || this.mesh.position.y < -18) {
-                    this.explode();
+                    // Ground collision
+                    if(isHost) {
+                        this.takeDamage(100, -1);
+                    } else {
+                        // FIX: CLIENT-SIDE GROUND CRASH
+                        // Notify host of suicide via pendingHits queue.
+                        // We check !isCrashed so we only send this once before the state resets
+                        if (!this.isCrashed) {
+                            pendingHits.push({ targetIdx: this.index, dmg: 100 });
+                            // Visual only until host syncs
+                            this.explode();
+                        }
+                    }
                 }
             }
 
             // Network Sync (For OTHER players)
             syncData(data) {
-                // FIXED: Handle HP and Crashes regardless of who I am (Server Authority)
-                if(data.crashed && !this.isCrashed) {
-                    this.explode();
-                } 
-                if(!data.crashed && this.isCrashed) {
-                    this.reset();
+                if (isHost) {
+                    // HOST AUTHORITY FIX (Part 2):
+                    // Previously we ignored HP/Crashed updates from the client entirely.
+                    // This caused the "Zombie Respawn" bug where the host kept thinking the player was dead.
+                    
+                    // NOW: If the Host thinks the player is crashed, but the client sends a "Not Crashed" flag,
+                    // we ACCEPT this as a valid Respawn event.
+                    if (this.isCrashed && !data.crashed) {
+                        this.isCrashed = false;
+                        this.hp = 100;
+                        this.mesh.visible = true;
+                        this.radarBlip.style.display = 'block';
+                    }
+
+                    // We still DO NOT accept HP updates for damage (Host is authority on damage),
+                    // but accepting the transition from Dead -> Alive is required.
+                } else {
+                    // CLIENT AUTHORITY FIX:
+                    // Client accepts everything from Host, with immunity buffer
+                    
+                    const isMe = this.index === myPlayerIndex;
+                    const isImmune = isMe && (Date.now() - (this.lastRespawnTime || 0) < 2000); 
+
+                    if(data.crashed && !this.isCrashed && !isImmune) {
+                        this.lastAttackerName = data.killer; 
+                        this.explode();
+                    } 
+                    if(!data.crashed && this.isCrashed) {
+                        this.reset();
+                    }
+                    this.hp = data.hp; 
+                    this.kills = data.k || 0;
+                    this.deaths = data.d || 0;
                 }
-                this.hp = data.hp; // Always accept server health
 
                 // FIXED: Only return early for POSITION updates if it is me
                 if (this.index === myPlayerIndex) return;
                 
-                // BUFFER STRATEGY: Do not move mesh yet. Store data.
+                // BUFFER STRATEGY
                 if (data.pos && data.quat) {
                     this.positionBuffer.push({
                         timestamp: Date.now(),
@@ -872,12 +1009,10 @@
                         quat: new THREE.Quaternion(data.quat._x || data.quat.x, data.quat._y || data.quat.y, data.quat._z || data.quat.z, data.quat._w || data.quat.w),
                         spd: data.spd,
                         throt: data.throt,
-                        shoot: data.shoot,
-                        hp: data.hp
+                        shoot: data.shoot
                     });
                 }
                 
-                // Cleanup Buffer (Keep only last ~2 seconds)
                 if (this.positionBuffer.length > 20) {
                     this.positionBuffer.shift();
                 }
@@ -887,9 +1022,8 @@
             interpolatePosition() {
                 if(this.isCrashed) return;
 
-                const renderTimestamp = Date.now() - 75; // 75ms Delay (1.5 ticks)
+                const renderTimestamp = Date.now() - 75; // 75ms Delay
 
-                // If buffer is empty or has only one point
                 if (this.positionBuffer.length === 0) return;
                 if (this.positionBuffer.length === 1) {
                     const snap = this.positionBuffer[0];
@@ -898,8 +1032,6 @@
                     return;
                 }
 
-                // Find the two snapshots around renderTimestamp
-                // Drop old frames
                 while (this.positionBuffer.length >= 2 && this.positionBuffer[1].timestamp <= renderTimestamp) {
                     this.positionBuffer.shift();
                 }
@@ -918,24 +1050,18 @@
                     this.mesh.position.lerpVectors(prev.pos, next.pos, alpha);
                     this.mesh.quaternion.slerpQuaternions(prev.quat, next.quat, alpha);
                     
-                    // Interpolate Scalars
                     this.speed = THREE.MathUtils.lerp(prev.spd, next.spd, alpha);
                     this.throttle = THREE.MathUtils.lerp(prev.throt, next.throt, alpha);
 
-                    // Shoot Sync (Based on interpolated time)
+                    // Shoot Visuals
                     if (next.shoot && !this.prevShootState) {
                         SoundGen.playShoot();
                         this.flashTimer = 0.1;
                         
-                        // FIXED: Host must spawn a physical bullet for collision check when Guest shoots
-                        if(isHost) {
-                            this.mesh.updateMatrixWorld(); // Ensure matrix is current
-                            _tempVec.set(0, 0, -4).applyMatrix4(this.mesh.matrixWorld);
-                            const p = projectilePool.find(proj => !proj.isActive);
-                            if(p) {
-                                p.activate(this.index, _tempVec, this.mesh.quaternion, this.speed);
-                            }
-                        }
+                        // GUEST SHOOTING FIX:
+                        // Host no longer spawns physical bullet for guest shots here.
+                        // Host relies strictly on the hit packets sent by the Guest Client.
+                        // This prevents double damage and ghost bullets.
                     }
                     this.prevShootState = next.shoot;
                 }
@@ -990,6 +1116,7 @@
             gameActive = true;
             document.getElementById('hud-main').style.display = 'flex';
             document.getElementById('controls').style.display = 'block';
+            document.getElementById('leaderboard').style.display = 'block';
 
             scene = new THREE.Scene();
             scene.fog = new THREE.FogExp2(0x87CEEB, 0.0004);
@@ -1200,9 +1327,34 @@
             packet.players.forEach(pData => {
                 const p = players.find(pl => pl.index === pData.idx);
                 if(p) {
-                    // This function now automatically ignores "me" inside the class
                     p.syncData(pData);
                 }
+            });
+            updateLeaderboard();
+        }
+
+        function updateLeaderboard() {
+            const sortedPlayers = [...players].sort((a, b) => b.kills - a.kills);
+            const tbody = document.getElementById('leaderboard-body');
+            tbody.innerHTML = '';
+            
+            sortedPlayers.forEach(p => {
+                const tr = document.createElement('tr');
+                if(p.index === myPlayerIndex) tr.style.color = '#00ff00';
+                
+                const nameTd = document.createElement('td');
+                nameTd.innerText = p.name;
+                
+                const kTd = document.createElement('td');
+                kTd.innerText = p.kills;
+                
+                const dTd = document.createElement('td');
+                dTd.innerText = p.deaths;
+                
+                tr.appendChild(nameTd);
+                tr.appendChild(kTd);
+                tr.appendChild(dTd);
+                tbody.appendChild(tr);
             });
         }
 
@@ -1336,7 +1488,8 @@
                                 // 2. Register Damage
                                 if (isHost) {
                                     // If I am Host, I apply damage directly
-                                    p.takeDamage(20);
+                                    // Attacker is ME (proj.ownerIdx)
+                                    p.takeDamage(20, proj.ownerIdx);
                                 } else {
                                     // If I am Client, I queue this hit to send to Host
                                     pendingHits.push({ targetIdx: p.index, dmg: 20 });
@@ -1359,6 +1512,9 @@
                     throt: p.throttle,
                     hp: p.hp,
                     crashed: p.isCrashed,
+                    k: p.kills, // Sync Kills
+                    d: p.deaths, // Sync Deaths
+                    killer: p.lastAttackerName, // Sync Killer name for death msg
                     shoot: (p.index === myPlayerIndex ? p.inputs.shoot : (p.muzzleFlash ? p.muzzleFlash.visible : false))
                 }));
 
@@ -1371,6 +1527,9 @@
                         data: { type: 'GAME_STATE', players: stateSnapshot } 
                     });
                 }
+                
+                // HOST: Update own leaderboard locally regularly (in case broadcast doesn't echo)
+                if (now % 200 < 20) updateLeaderboard();
             }
 
             // Common Updates
