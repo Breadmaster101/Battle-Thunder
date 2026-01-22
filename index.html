@@ -1520,7 +1520,7 @@
             // 5. Water
             const waterGeo = new THREE.PlaneGeometry(CONFIG.width, CONFIG.width);
             water = new Water(waterGeo, {
-                textureWidth: 512, textureHeight: 512,
+                textureWidth: 256, textureHeight: 256,
                 waterNormals: matWater.norm,
                 sunDirection: sunLight.position.clone().normalize(),
                 sunColor: 0xffffff, waterColor: 0x061821,
