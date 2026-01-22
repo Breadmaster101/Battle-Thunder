@@ -1449,7 +1449,7 @@
             skyUniforms['turbidity'].value = 10;
             skyUniforms['rayleigh'].value = 3;
             skyUniforms['mieCoefficient'].value = 0.005;
-            skyUniforms['mieDirectionalG'].value = 0.7;
+            skyUniforms['mieDirectionalG'].value = 0.99;
             sky.material.uniforms['sunPosition'].value.copy(sunLight.position);
 
             const pmremGenerator = new THREE.PMREMGenerator(renderer);
