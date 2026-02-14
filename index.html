@@ -235,15 +235,17 @@
             text-align: left;
         }
 
-        /* BAKING OVERLAY */
+        /* BAKING OVERLAY - Updated to match Lobby background */
         #bake-overlay {
             position: absolute; top: 0; left: 0; width: 100%; height: 100%;
-            background: #020202; z-index: 3000; display: none; flex-direction: column;
+            background: radial-gradient(circle, #1a2a3a 0%, #000000 90%);
+            z-index: 3000; 
+            display: none; 
+            flex-direction: column;
             align-items: center; justify-content: center; 
-            pointer-events: none;
         }
-        .loader-track { width: 300px; height: 1px; background: #222; position: relative; overflow: hidden; }
-        .loader-bar { position: absolute; top: 0; left: 0; height: 100%; width: 100%; background: #fff; box-shadow: 0 0 15px #fff; animation: load 2s infinite; }
+        .loader-track { width: 300px; height: 2px; background: #222; position: relative; overflow: hidden; }
+        .loader-bar { position: absolute; top: 0; left: 0; height: 100%; width: 100%; background: #00ff00; box-shadow: 0 0 15px #00ff00; animation: load 2s infinite; }
         @keyframes load { 0% { transform: translateX(-100%); } 100% { transform: translateX(100%); } }
     </style>
 </head>
@@ -285,8 +287,15 @@
     </div>
 
     <div id="bake-overlay">
-        <div style="color:white; margin-bottom:20px; font-family:'Segoe UI'; letter-spacing:4px;">GENERATING TERRAIN</div>
-        <div class="loader-track"><div class="loader-bar"></div></div>
+        <div class="panel-box">
+            <div class="lobby-title">DEPLOYING</div>
+            <div style="color: #00ff00; font-size: 18px; margin: 20px 0;">
+                GENERATING TERRAIN...
+            </div>
+            <div class="loader-track" style="margin: 20px auto;">
+                <div class="loader-bar" style="animation-duration: 1.0s;"></div>
+            </div>
+        </div>
     </div>
 
     <!-- HUD -->
@@ -823,8 +832,12 @@
                     }
                 } else if (packet.type === 'START_GAME') {
                     document.getElementById('lobby-overlay').style.display = 'none';
-                    // Pass the room code so client generates same map as host
-                    initGameWorld(netPlayers, myRoomCode);
+                    document.getElementById('bake-overlay').style.display = 'flex'; // Show Loading Screen
+                    
+                    // Delay initialization to allow UI to paint
+                    setTimeout(() => {
+                        initGameWorld(netPlayers, myRoomCode);
+                    }, 100);
                 } else if (packet.type === 'GAME_STATE') {
                     // Everyone (Host and Client) processes state updates for OTHER players
                     if(gameActive) handleGameState(packet);
@@ -887,9 +900,16 @@
         
         window.startGame = function() {
             if(!isHost) return;
-            socket.emit('host_broadcast', { roomCode: myRoomCode, data: { type: 'START_GAME' } });
+            // Immediate UI feedback for Host
             document.getElementById('lobby-overlay').style.display = 'none';
-            initGameWorld(netPlayers, myRoomCode);
+            document.getElementById('bake-overlay').style.display = 'flex';
+
+            socket.emit('host_broadcast', { roomCode: myRoomCode, data: { type: 'START_GAME' } });
+            
+            // Delay initialization to allow UI to paint
+            setTimeout(() => {
+                initGameWorld(netPlayers, myRoomCode);
+            }, 100);
         };
 
         function updateLobbyUI() {
@@ -990,10 +1010,27 @@
                 this.index = config.index;
                 this.socketId = config.id;
                 this.name = config.name;
-                this.color = new THREE.Color().setHSL(Math.random(), 0.8, 0.5);
                 
-                this.speed = 0;
-                this.throttle = 0;
+                // --- COLOR SYNC LOGIC ---
+                // Deterministic color assignment based on player index.
+                // Replaced 0x444444 with 0xFF4500 (Orange Red) to avoid blending with dark water.
+                // Palette includes no Blue to prevent sky blending.
+                const planePalette = [
+                    0xFF0000, // Red
+                    0x00FF00, // Green
+                    0xFFFF00, // Yellow
+                    0xFF00FF, // Magenta
+                    0xFF8C00, // Dark Orange
+                    0xFFFFFF, // White
+                    0x7CFC00, // Lawn Green
+                    0xDC143C, // Crimson
+                    0xFF1493, // Deep Pink
+                    0xFF4500  // Orange Red
+                ];
+                this.color = new THREE.Color(planePalette[this.index % planePalette.length]);
+                
+                this.speed = 1.0875;
+                this.throttle = 0.5;
                 this.hp = 100;
                 this.isCrashed = false;
                 this.trailParticles = [];
@@ -1129,7 +1166,7 @@
                 // Only grant kill if they were alive BEFORE this specific shot, and dead AFTER
                 if(wasAlive && this.hp <= 0) {
                     this.hp = 0;
-                    this.isCrashed = true; // Set crashed immediately on Host
+                    // FIX: Removed premature 'this.isCrashed = true' to allow explode() to execute fully for Host
                     this.deaths++;
                     
                     // Assign Kill - Strict Type Checking
@@ -1154,8 +1191,8 @@
                 const r = 1000 + Math.random() * 500;
                 this.mesh.position.set(Math.sin(angle)*r, 600, Math.cos(angle)*r);
                 this.mesh.lookAt(0, 600, 0);
-                this.speed = 0;
-                this.throttle = 0;
+                this.speed = 1.0875;
+                this.throttle = 0.5;
                 this.hp = 100;
                 this.isCrashed = false;
                 this.lastAttackerName = null;
@@ -1286,24 +1323,35 @@
             syncData(data) {
                 if (isHost) {
                     // HOST AUTHORITY FIX (Part 2):
-                    if (this.isCrashed && !data.crashed) {
+                    // If local state says crashed, but client says alive -> Respawn
+                    // OR if local HP is zero/negative but client says they are alive -> Sync Respawn
+                    if ((this.isCrashed || this.hp <= 0) && !data.crashed) {
                         this.isCrashed = false;
                         this.hp = 100;
                         this.mesh.visible = true;
                         this.radarBlip.style.display = 'block';
                     }
                 } else {
-                    // CLIENT AUTHORITY FIX:
-                    const isMe = this.index === myPlayerIndex;
-                    const isImmune = isMe && (Date.now() - (this.lastRespawnTime || 0) < 2000); 
+                    // CLIENT AUTHORITY LOGIC FOR REMOTE PLAYERS
+                    // If this is MY player, I ignore the server's crash/HP state updates 
+                    // because I run the logic locally in updatePhysics (including the 3s death timer).
+                    // This prevents the server from forcing a reset before the 3s timer completes.
+                    if (this.index === myPlayerIndex) {
+                        // Just update stats, ignore physics/life state
+                        this.kills = data.k || 0;
+                        this.deaths = data.d || 0;
+                        return;
+                    }
 
-                    if(data.crashed && !this.isCrashed && !isImmune) {
+                    // Standard sync for REMOTE players
+                    if(data.crashed && !this.isCrashed) {
                         this.lastAttackerName = data.killer; 
                         this.explode();
                     } 
                     if(!data.crashed && this.isCrashed) {
                         this.reset();
                     }
+                    
                     this.hp = data.hp; 
                     this.kills = data.k || 0;
                     this.deaths = data.d || 0;
@@ -1418,7 +1466,7 @@
         // --- GLOBAL INITIALIZATION ---
         function initGameWorld(playerList, roomCode) {
             console.group("🚀 INITIALIZING NORDIC OPERATIONS");
-            document.getElementById('bake-overlay').style.display = 'flex';
+            // Overlay is already shown via startGame/socket, handled there to prevent freeze
             
             // --- TERRAIN SEED INITIALIZATION ---
             // Use the room code to seed the RNG so all clients share the same map
