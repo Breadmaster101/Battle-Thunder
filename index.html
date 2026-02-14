@@ -257,6 +257,16 @@
             <button onclick="goToMenu()">ENTER HANGAR</button>
         </div>
 
+        <div id="step-connecting" class="panel-box" style="display:none;">
+            <div class="lobby-title">CONNECTING</div>
+            <div style="color: #00ff00; font-size: 18px; margin: 20px 0;">
+                <span id="connection-status">Connecting to server...</span>
+            </div>
+            <div class="loader-track" style="margin: 20px auto;">
+                <div class="loader-bar" style="animation-duration: 1.5s;"></div>
+            </div>
+        </div>
+
         <div id="step-menu" class="panel-box" style="display:none;">
             <div class="lobby-title">MISSION SELECT</div>
             <button onclick="hostGame()" style="width: 100%;">HOST SQUADRON</button>
@@ -762,16 +772,34 @@
             if(!nameInput.value) { alert("ENTER CALLSIGN"); return; }
             myUsername = nameInput.value;
             
-            // Connect Socket
-            socket = io(SOCKET_URL);
+            // Show connecting overlay
+            document.getElementById('step-login').style.display = 'none';
+            document.getElementById('step-connecting').style.display = 'block';
+            
+            // Connect Socket with automatic reconnection every second
+            socket = io(SOCKET_URL, {
+                reconnectionAttempts: Infinity,
+                reconnectionDelay: 1000,
+                timeout: 10000
+            });
+            
+            // Change message after 2 seconds if still not connected
+            setTimeout(() => {
+                if (!socket.connected) {
+                    document.getElementById('connection-status').textContent = 'Server is starting up, please wait...';
+                }
+            }, 2000);
             
             socket.on('connect', () => {
                 console.log("Connected to server");
-                document.getElementById('step-login').style.display = 'none';
+                document.getElementById('step-connecting').style.display = 'none';
                 document.getElementById('step-menu').style.display = 'block';
             });
 
-            socket.on('error_msg', (msg) => alert(msg));
+            socket.on('error_msg', (msg) => {
+                console.error('Server error:', msg);
+                alert(msg);
+            });
             
             // Lobby Logic
             socket.on('player_joined', (p) => {
