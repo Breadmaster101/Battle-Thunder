@@ -1023,41 +1023,152 @@
 
             createPlaneMesh(color) {
                 const planeGroup = new THREE.Group();
-                const fuselageGeo = new THREE.ConeGeometry(1.2, 12, 16);
-                fuselageGeo.rotateX(Math.PI / 2);
-                const bodyMat = new THREE.MeshStandardMaterial({ color: 0xeeeeee, roughness: 0.2, metalness: 0.6 });
-                const fuselage = new THREE.Mesh(fuselageGeo, bodyMat);
-                planeGroup.add(fuselage);
+                const fuselageColor = 0x8899aa; // Tactical Grey/Silver
 
-                const cockpitGeo = new THREE.BoxGeometry(1.4, 1.2, 3);
-                const cockpitMat = new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 0.0, metalness: 0.9 });
-                const cockpit = new THREE.Mesh(cockpitGeo, cockpitMat);
-                cockpit.position.set(0, 0.8, 1);
+                const bodyMat = new THREE.MeshStandardMaterial({ 
+                    color: fuselageColor, 
+                    roughness: 0.4, 
+                    metalness: 0.6,
+                    flatShading: true
+                });
+                const highlightMat = new THREE.MeshStandardMaterial({
+                    color: color,
+                    roughness: 0.5,
+                    metalness: 0.2
+                });
+                const glassMat = new THREE.MeshPhysicalMaterial({
+                    color: 0x111111,
+                    metalness: 0.9,
+                    roughness: 0.05,
+                    transparent: true,
+                    opacity: 0.9,
+                    envMapIntensity: 1.0
+                });
+
+                // 1. Fuselage Main Body (Cylinder)
+                const bodyGeo = new THREE.CylinderGeometry(1.1, 0.9, 7, 10);
+                bodyGeo.rotateX(Math.PI / 2); // Align with Z
+                const body = new THREE.Mesh(bodyGeo, bodyMat);
+                planeGroup.add(body);
+
+                // 2. Engine Cowling / Nose
+                const noseGeo = new THREE.CylinderGeometry(0.9, 0.8, 3.5, 10);
+                noseGeo.rotateX(Math.PI / 2);
+                noseGeo.translate(0, 0, -5.25);
+                const nose = new THREE.Mesh(noseGeo, bodyMat);
+                planeGroup.add(nose);
+
+                // Spinner (Color coded)
+                const spinnerGeo = new THREE.CylinderGeometry(0.8, 0.1, 2, 10);
+                spinnerGeo.rotateX(Math.PI / 2);
+                spinnerGeo.translate(0, 0, -8);
+                const spinner = new THREE.Mesh(spinnerGeo, highlightMat);
+                planeGroup.add(spinner);
+
+                // 3. Tail Boom - Fixed radiusBottom to 1.1 to match fuselage body rear diameter
+                const tailBoomGeo = new THREE.CylinderGeometry(0.4, 1.1, 6, 10);
+                tailBoomGeo.rotateX(Math.PI / 2);
+                tailBoomGeo.translate(0, 0, 6.5);
+                const tailBoom = new THREE.Mesh(tailBoomGeo, bodyMat);
+                planeGroup.add(tailBoom);
+
+                // 4. Cockpit (Bubble Canopy)
+                const cockpitGeo = new THREE.SphereGeometry(1.1, 12, 12);
+                cockpitGeo.scale(1, 0.8, 2.5);
+                cockpitGeo.translate(0, 0.8, -0.5);
+                const cockpit = new THREE.Mesh(cockpitGeo, glassMat);
                 planeGroup.add(cockpit);
 
-                const wingGeo = new THREE.BoxGeometry(12, 0.15, 3);
-                const wingMat = new THREE.MeshStandardMaterial({ color: color, roughness: 0.3, metalness: 0.4 });
-                const wings = new THREE.Mesh(wingGeo, wingMat);
-                wings.position.set(0, 0, 1);
-                planeGroup.add(wings);
+                // 5. Wings (Swept & Tapered using custom BufferGeometry logic via simple shapes)
+                // Using flattened cubes for simplicity but angled for sweep
+                const wingGroup = new THREE.Group();
+                
+                // Left Wing
+                const wGeo = new THREE.BoxGeometry(7, 0.2, 3);
+                wGeo.translate(3.5, 0, 0.5); // Pivot at root
+                const leftWing = new THREE.Mesh(wGeo, bodyMat);
+                leftWing.position.set(0.8, -0.2, -1);
+                leftWing.rotation.x = -0.05; // Dihedral
+                leftWing.rotation.y = -0.2;  // Sweep
+                
+                // Wing Tip (Color)
+                const wTipGeo = new THREE.BoxGeometry(0.5, 0.21, 3);
+                wTipGeo.translate(7.25, 0, 0.5);
+                const leftTip = new THREE.Mesh(wTipGeo, highlightMat);
+                leftTip.position.set(0.8, -0.2, -1);
+                leftTip.rotation.x = -0.05;
+                leftTip.rotation.y = -0.2;
 
-                const tailGroup = new THREE.Group();
-                const hStab = new THREE.Mesh(new THREE.BoxGeometry(4, 0.15, 2), wingMat);
-                tailGroup.add(hStab);
-                const vStab = new THREE.Mesh(new THREE.BoxGeometry(0.15, 2.5, 2), wingMat);
-                vStab.position.set(0, 1.25, 0);
-                tailGroup.add(vStab);
-                tailGroup.position.set(0, 0, 5);
-                planeGroup.add(tailGroup);
+                // Right Wing
+                const rightWing = new THREE.Mesh(wGeo, bodyMat);
+                rightWing.position.set(-0.8, -0.2, -1);
+                rightWing.rotation.x = 0.05; // Dihedral
+                rightWing.rotation.y = 0.2;  // Sweep
+                rightWing.scale.x = -1; // Mirror
 
-                this.propeller = new THREE.Mesh(new THREE.BoxGeometry(3.5, 0.1, 0.3), new THREE.MeshStandardMaterial({ color: 0x111111 }));
-                this.propeller.position.set(0, 0, -6);
+                const rightTip = new THREE.Mesh(wTipGeo, highlightMat);
+                rightTip.position.set(-0.8, -0.2, -1);
+                rightTip.rotation.x = 0.05;
+                rightTip.rotation.y = 0.2;
+                rightTip.scale.x = -1;
+
+                wingGroup.add(leftWing, rightWing, leftTip, rightTip);
+                planeGroup.add(wingGroup);
+
+                // 6. Tail Stabilizers
+                const hStabGeo = new THREE.BoxGeometry(5, 0.15, 2);
+                hStabGeo.translate(0, 0, 1);
+                const hStab = new THREE.Mesh(hStabGeo, bodyMat);
+                hStab.position.set(0, 0.28, 8.5);
+                planeGroup.add(hStab);
+
+                const vStabGeo = new THREE.BoxGeometry(0.2, 3, 2.5);
+                // Skew geometry for sweep effect manually
+                const pos = vStabGeo.attributes.position;
+                for(let i=0; i<pos.count; i++){
+                    const y = pos.getY(i);
+                    if(y > 0) pos.setZ(i, pos.getZ(i) + 1.5); // Sweep back top
+                }
+                vStabGeo.computeVertexNormals();
+                
+                const vStab = new THREE.Mesh(vStabGeo, highlightMat);
+                vStab.position.set(0, 2.0, 8.5);
+                planeGroup.add(vStab);
+
+                // 7. Underside Scoop (Radiator)
+                const scoopGeo = new THREE.BoxGeometry(1.2, 0.6, 3);
+                scoopGeo.translate(0, -0.3, 0);
+                const scoop = new THREE.Mesh(scoopGeo, bodyMat);
+                scoop.position.set(0, -0.9, 1);
+                planeGroup.add(scoop);
+
+                // 8. Propeller Assembly
+                this.propeller = new THREE.Group();
+                const bladeGeo = new THREE.BoxGeometry(0.18, 3.6, 0.2);
+                bladeGeo.translate(0, 1.8, 0);
+                const propMat = new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.5 });
+                
+                for(let i=0; i<3; i++) {
+                    const blade = new THREE.Mesh(bladeGeo, propMat);
+                    blade.rotation.z = (i / 3) * Math.PI * 2;
+                    this.propeller.add(blade);
+                }
+                
+                // Propeller Spinner Cap
+                const capGeo = new THREE.ConeGeometry(0.3, 0.5, 8);
+                capGeo.rotateX(Math.PI/2);
+                capGeo.translate(0,0,0.25);
+                const propCap = new THREE.Mesh(capGeo, highlightMat);
+                this.propeller.add(propCap);
+
+                this.propeller.position.set(0, 0, -9.1);
                 planeGroup.add(this.propeller);
 
+                // Muzzle Flash
                 const flashGeo = new THREE.DodecahedronGeometry(0.8, 0);
                 const flashMat = new THREE.MeshBasicMaterial({ color: 0xffff00, transparent: true, opacity: 0.8 });
                 this.muzzleFlash = new THREE.Mesh(flashGeo, flashMat);
-                this.muzzleFlash.position.set(0, 0, -7.5); 
+                this.muzzleFlash.position.set(0, 0, -10.5); 
                 this.muzzleFlash.visible = false; 
                 planeGroup.add(this.muzzleFlash);
 
