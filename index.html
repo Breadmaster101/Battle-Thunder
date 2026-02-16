@@ -207,7 +207,7 @@
             color: white;
             font-family: 'Courier New', Courier, monospace;
             display: none; 
-            min-width: 200px;
+            min-width: 220px;
             z-index: 200; 
             pointer-events: none;
         }
@@ -229,6 +229,14 @@
         }
         #leaderboard td:first-child {
             text-align: left;
+        }
+
+        .color-indicator {
+            width: 12px;
+            height: 12px;
+            display: inline-block;
+            border: 1px solid rgba(255,255,255,0.4);
+            vertical-align: middle;
         }
 
         #bake-overlay {
@@ -314,6 +322,7 @@
             <thead>
                 <tr>
                     <th>PILOT</th>
+                    <th>C</th>
                     <th>K</th>
                     <th>D</th>
                 </tr>
@@ -803,24 +812,49 @@
                     }, 100);
                 } else if (packet.type === 'GAME_STATE') {
                     if(gameActive) handleGameState(packet);
+                } else if (packet.type === 'HIT_EVENT') {
+                    if (gameActive) {
+                        const target = players.find(p => p.index === packet.targetIdx);
+                        if (target && target.index === myPlayerIndex) {
+                            target.takeDamage(packet.dmg, packet.attackerIdx);
+                        }
+                    }
                 }
             });
             
             socket.on('player_data', (packet) => {
                 if(isHost && gameActive) {
                     const p = players.find(pl => pl.index === packet.data.idx);
+                    
+                    // Handle Host Scoreboard Duties
+                    if (packet.data.type === 'PLAYER_DIED') {
+                        const victim = p;
+                        if (victim) {
+                            victim.deaths++;
+                            if (packet.data.attackerIdx !== null && packet.data.attackerIdx !== -1) {
+                                const attacker = players.find(pa => pa.index === packet.data.attackerIdx);
+                                if (attacker && attacker.index !== victim.index) {
+                                    attacker.kills++;
+                                }
+                            }
+                        }
+                        return;
+                    }
+
+                    if (packet.data.type === 'HIT_EVENT') {
+                        // Relay hit to all players
+                        socket.emit('host_broadcast', { roomCode: myRoomCode, data: packet.data });
+                        
+                        // Check if host is the target
+                        if (packet.data.targetIdx === myPlayerIndex) {
+                            const localMe = players.find(pl => pl.index === myPlayerIndex);
+                            if (localMe) localMe.takeDamage(packet.data.dmg, packet.data.attackerIdx);
+                        }
+                        return;
+                    }
+
                     if(p) {
                         p.syncData(packet.data);
-                    }
-                    
-                    if (packet.data.hits && Array.isArray(packet.data.hits)) {
-                        const attackerId = Number(packet.data.idx); 
-                        packet.data.hits.forEach(hit => {
-                            const target = players.find(t => t.index === hit.targetIdx);
-                            if(target && !target.isCrashed) {
-                                target.takeDamage(hit.dmg, attackerId);
-                            }
-                        });
                     }
                 }
             });
@@ -994,6 +1028,7 @@
                 this.lastAttackerName = null;
                 this.lastRespawnTime = 0;
                 this.positionBuffer = [];
+                this.respawnTimer = 0;
 
                 this.inputs = {
                     pitch: 0, 
@@ -1023,7 +1058,7 @@
 
             createPlaneMesh(color) {
                 const planeGroup = new THREE.Group();
-                const fuselageColor = 0x8899aa; // Tactical Grey/Silver
+                const fuselageColor = 0x8899aa; 
 
                 const bodyMat = new THREE.MeshStandardMaterial({ 
                     color: fuselageColor, 
@@ -1045,53 +1080,44 @@
                     envMapIntensity: 1.0
                 });
 
-                // 1. Fuselage Main Body (Cylinder)
                 const bodyGeo = new THREE.CylinderGeometry(1.1, 0.9, 7, 10);
-                bodyGeo.rotateX(Math.PI / 2); // Align with Z
+                bodyGeo.rotateX(Math.PI / 2); 
                 const body = new THREE.Mesh(bodyGeo, bodyMat);
                 planeGroup.add(body);
 
-                // 2. Engine Cowling / Nose
                 const noseGeo = new THREE.CylinderGeometry(0.9, 0.8, 3.5, 10);
                 noseGeo.rotateX(Math.PI / 2);
                 noseGeo.translate(0, 0, -5.25);
                 const nose = new THREE.Mesh(noseGeo, bodyMat);
                 planeGroup.add(nose);
 
-                // Spinner (Color coded)
                 const spinnerGeo = new THREE.CylinderGeometry(0.8, 0.1, 2, 10);
                 spinnerGeo.rotateX(Math.PI / 2);
                 spinnerGeo.translate(0, 0, -8);
                 const spinner = new THREE.Mesh(spinnerGeo, highlightMat);
                 planeGroup.add(spinner);
 
-                // 3. Tail Boom - Fixed radiusBottom to 1.1 to match fuselage body rear diameter
                 const tailBoomGeo = new THREE.CylinderGeometry(0.4, 1.1, 6, 10);
                 tailBoomGeo.rotateX(Math.PI / 2);
                 tailBoomGeo.translate(0, 0, 6.5);
                 const tailBoom = new THREE.Mesh(tailBoomGeo, bodyMat);
                 planeGroup.add(tailBoom);
 
-                // 4. Cockpit (Bubble Canopy)
                 const cockpitGeo = new THREE.SphereGeometry(1.1, 12, 12);
                 cockpitGeo.scale(1, 0.8, 2.5);
                 cockpitGeo.translate(0, 0.8, -0.5);
                 const cockpit = new THREE.Mesh(cockpitGeo, glassMat);
                 planeGroup.add(cockpit);
 
-                // 5. Wings (Swept & Tapered using custom BufferGeometry logic via simple shapes)
-                // Using flattened cubes for simplicity but angled for sweep
                 const wingGroup = new THREE.Group();
                 
-                // Left Wing
                 const wGeo = new THREE.BoxGeometry(7, 0.2, 3);
-                wGeo.translate(3.5, 0, 0.5); // Pivot at root
+                wGeo.translate(3.5, 0, 0.5); 
                 const leftWing = new THREE.Mesh(wGeo, bodyMat);
                 leftWing.position.set(0.8, -0.2, -1);
-                leftWing.rotation.x = -0.05; // Dihedral
-                leftWing.rotation.y = -0.2;  // Sweep
+                leftWing.rotation.x = -0.05; 
+                leftWing.rotation.y = -0.2;  
                 
-                // Wing Tip (Color)
                 const wTipGeo = new THREE.BoxGeometry(0.5, 0.21, 3);
                 wTipGeo.translate(7.25, 0, 0.5);
                 const leftTip = new THREE.Mesh(wTipGeo, highlightMat);
@@ -1099,12 +1125,11 @@
                 leftTip.rotation.x = -0.05;
                 leftTip.rotation.y = -0.2;
 
-                // Right Wing
                 const rightWing = new THREE.Mesh(wGeo, bodyMat);
                 rightWing.position.set(-0.8, -0.2, -1);
-                rightWing.rotation.x = 0.05; // Dihedral
-                rightWing.rotation.y = 0.2;  // Sweep
-                rightWing.scale.x = -1; // Mirror
+                rightWing.rotation.x = 0.05; 
+                rightWing.rotation.y = 0.2;  
+                rightWing.scale.x = -1; 
 
                 const rightTip = new THREE.Mesh(wTipGeo, highlightMat);
                 rightTip.position.set(-0.8, -0.2, -1);
@@ -1115,7 +1140,6 @@
                 wingGroup.add(leftWing, rightWing, leftTip, rightTip);
                 planeGroup.add(wingGroup);
 
-                // 6. Tail Stabilizers
                 const hStabGeo = new THREE.BoxGeometry(5, 0.15, 2);
                 hStabGeo.translate(0, 0, 1);
                 const hStab = new THREE.Mesh(hStabGeo, bodyMat);
@@ -1123,11 +1147,10 @@
                 planeGroup.add(hStab);
 
                 const vStabGeo = new THREE.BoxGeometry(0.2, 3, 2.5);
-                // Skew geometry for sweep effect manually
                 const pos = vStabGeo.attributes.position;
                 for(let i=0; i<pos.count; i++){
                     const y = pos.getY(i);
-                    if(y > 0) pos.setZ(i, pos.getZ(i) + 1.5); // Sweep back top
+                    if(y > 0) pos.setZ(i, pos.getZ(i) + 1.5); 
                 }
                 vStabGeo.computeVertexNormals();
                 
@@ -1135,14 +1158,12 @@
                 vStab.position.set(0, 2.0, 8.5);
                 planeGroup.add(vStab);
 
-                // 7. Underside Scoop (Radiator)
                 const scoopGeo = new THREE.BoxGeometry(1.2, 0.6, 3);
                 scoopGeo.translate(0, -0.3, 0);
                 const scoop = new THREE.Mesh(scoopGeo, bodyMat);
                 scoop.position.set(0, -0.9, 1);
                 planeGroup.add(scoop);
 
-                // 8. Propeller Assembly
                 this.propeller = new THREE.Group();
                 const bladeGeo = new THREE.BoxGeometry(0.18, 3.6, 0.2);
                 bladeGeo.translate(0, 1.8, 0);
@@ -1154,7 +1175,6 @@
                     this.propeller.add(blade);
                 }
                 
-                // Propeller Spinner Cap
                 const capGeo = new THREE.ConeGeometry(0.3, 0.5, 8);
                 capGeo.rotateX(Math.PI/2);
                 capGeo.translate(0,0,0.25);
@@ -1164,7 +1184,6 @@
                 this.propeller.position.set(0, 0, -9.1);
                 planeGroup.add(this.propeller);
 
-                // Muzzle Flash
                 const flashGeo = new THREE.DodecahedronGeometry(0.8, 0);
                 const flashMat = new THREE.MeshBasicMaterial({ color: 0xffff00, transparent: true, opacity: 0.8 });
                 this.muzzleFlash = new THREE.Mesh(flashGeo, flashMat);
@@ -1208,29 +1227,49 @@
             }
 
             takeDamage(amount, attackerIdx) {
-                if(!isHost) return; 
                 if(this.isCrashed) return;
                 
-                const wasAlive = this.hp > 0;
-                this.hp -= amount;
-                
-                if(wasAlive && this.hp <= 0) {
-                    this.hp = 0;
-                    this.deaths++;
-                    
-                    let validAttacker = Number(attackerIdx);
-                    
-                    if (!isNaN(validAttacker) && validAttacker >= 0 && validAttacker !== this.index) {
-                        const attacker = players.find(p => p.index === validAttacker);
-                        if (attacker) {
-                            attacker.kills++;
-                            this.lastAttackerName = attacker.name;
-                        }
-                    } else {
-                        this.lastAttackerName = null;
+                // Guest Trusted Logic: Apply damage locally only
+                if (this.index === myPlayerIndex) {
+                    this.hp -= amount;
+                    if (this.hp <= 0) {
+                        this.hp = 0;
+                        this.die(attackerIdx);
                     }
+                }
+            }
 
-                    this.explode();
+            die(attackerIdx) {
+                if (this.isCrashed) return;
+                
+                this.deaths++;
+                let killerName = null;
+                if (attackerIdx !== null && attackerIdx !== -1) {
+                    const attacker = players.find(p => p.index === attackerIdx);
+                    if (attacker) {
+                        killerName = attacker.name;
+                    }
+                }
+                
+                this.lastAttackerName = killerName;
+                this.explode();
+                
+                // Notify host for scoreboard updates
+                const deathData = {
+                    type: 'PLAYER_DIED',
+                    idx: this.index,
+                    attackerIdx: attackerIdx
+                };
+                
+                if (isHost) {
+                    // Host handles their own death immediately in the local players array
+                    // Scoreboard updates are then broadcast in the next GAME_STATE
+                    if (attackerIdx !== null && attackerIdx !== -1) {
+                        const attacker = players.find(p => p.index === attackerIdx);
+                        if (attacker && attacker.index !== this.index) attacker.kills++;
+                    }
+                } else {
+                    socket.emit('client_send', { roomCode: myRoomCode, data: deathData });
                 }
             }
 
@@ -1249,16 +1288,17 @@
                 this.engineSound.restart();
                 this.positionBuffer = []; 
                 this.lastRespawnTime = Date.now();
+                this.respawnTimer = 0;
                 
                 if(this.index === myPlayerIndex) document.getElementById('crash-msg').style.display = 'none';
             }
 
             updatePhysics(timeScale) {
+                // Local control over own physics/life
                 if (this.isCrashed) {
-                    this.respawnTimer = (this.respawnTimer || 0) + (0.016 * timeScale);
+                    this.respawnTimer += (0.016 * timeScale);
                     if (this.respawnTimer > 3.0) { 
                         this.reset();
-                        this.respawnTimer = 0;
                     }
                     return;
                 }
@@ -1339,46 +1379,32 @@
                 }
 
                 if (hitEnvironment) {
-                    if(isHost) {
-                        this.takeDamage(100, -1);
-                    } else {
-                        if (!this.isCrashed) {
-                            pendingHits.push({ targetIdx: this.index, dmg: 100 });
-                            this.explode();
-                        }
-                    }
+                    this.takeDamage(100, -1);
                 }
             }
 
             syncData(data) {
-                if (isHost) {
-                    if ((this.isCrashed || this.hp <= 0) && !data.crashed) {
-                        this.isCrashed = false;
-                        this.hp = 100;
-                        this.mesh.visible = true;
-                        this.radarBlip.style.display = 'block';
-                    }
-                } else {
-                    if (this.index === myPlayerIndex) {
-                        this.kills = data.k || 0;
-                        this.deaths = data.d || 0;
-                        return;
-                    }
-
-                    if(data.crashed && !this.isCrashed) {
-                        this.lastAttackerName = data.killer; 
-                        this.explode();
-                    } 
-                    if(!data.crashed && this.isCrashed) {
-                        this.reset();
-                    }
-                    
-                    this.hp = data.hp; 
+                // Always trust Host for scores
+                if (!isHost) {
                     this.kills = data.k || 0;
                     this.deaths = data.d || 0;
                 }
 
-                if (this.index === myPlayerIndex) return;
+                if (this.index === myPlayerIndex) {
+                    // Local player: Ignore remote HP/Crashed state (Trust Local)
+                    return;
+                }
+
+                // Sync others
+                if(data.crashed && !this.isCrashed) {
+                    this.lastAttackerName = data.killer; 
+                    this.explode();
+                } 
+                if(!data.crashed && this.isCrashed) {
+                    this.reset();
+                }
+                
+                this.hp = data.hp; 
                 
                 if (data.pos && data.quat) {
                     this.positionBuffer.push({
@@ -1742,6 +1768,12 @@
                 
                 const nameTd = document.createElement('td');
                 nameTd.innerText = p.name;
+
+                const cTd = document.createElement('td');
+                const colorBox = document.createElement('div');
+                colorBox.className = 'color-indicator';
+                colorBox.style.backgroundColor = '#' + p.color.getHexString();
+                cTd.appendChild(colorBox);
                 
                 const kTd = document.createElement('td');
                 kTd.innerText = p.kills;
@@ -1750,6 +1782,7 @@
                 dTd.innerText = p.deaths;
                 
                 tr.appendChild(nameTd);
+                tr.appendChild(cTd);
                 tr.appendChild(kTd);
                 tr.appendChild(dTd);
                 tbody.appendChild(tr);
@@ -1817,6 +1850,7 @@
                 if (p.index === myPlayerIndex) {
                     p.updatePhysics(timeScale);
                 } else {
+                    // Everyone manages their own life status locally
                     p.interpolatePosition();
                 }
                 p.updateVisuals(timeScale); 
@@ -1833,10 +1867,9 @@
                     throt: me.throttle,
                     hp: me.hp,
                     crashed: me.isCrashed,
-                    shoot: me.inputs.shoot,
-                    hits: pendingHits 
+                    killer: me.lastAttackerName,
+                    shoot: me.inputs.shoot
                 };
-                pendingHits = [];
 
                 if(!isHost) {
                     socket.emit('client_send', { roomCode: myRoomCode, data: myData });
@@ -1853,6 +1886,7 @@
                     proj.isActive = false; proj.mesh.visible = false;
                     continue;
                 }
+                // Shooter-Authoritative: Shooter detects the hit on their screen
                 if (proj.ownerIdx === myPlayerIndex) {
                     for (let p of players) {
                         if (p.index !== myPlayerIndex && !p.isCrashed) {
@@ -1860,10 +1894,22 @@
                                 explosions.push(new Explosion(proj.mesh.position, 0xffaa00));
                                 SoundGen.playExplosion();
                                 proj.isActive = false; proj.mesh.visible = false;
+                                
+                                const hitData = { 
+                                    type: 'HIT_EVENT', 
+                                    targetIdx: p.index, 
+                                    attackerIdx: myPlayerIndex, 
+                                    dmg: 20 
+                                };
+
                                 if (isHost) {
-                                    p.takeDamage(20, proj.ownerIdx);
+                                    // Host relays hit to everyone
+                                    socket.emit('host_broadcast', { roomCode: myRoomCode, data: hitData });
+                                    // If host somehow hit themselves, apply it
+                                    if (p.index === myPlayerIndex) p.takeDamage(20, myPlayerIndex);
                                 } else {
-                                    pendingHits.push({ targetIdx: p.index, dmg: 20 });
+                                    // Guest sends hit to host to relay
+                                    socket.emit('client_send', { roomCode: myRoomCode, data: hitData });
                                 }
                                 break; 
                             }
