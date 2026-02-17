@@ -346,6 +346,7 @@
         [A/D] or [LEFT/RIGHT] Roll<br>
         [SHIFT] Throttle Up<br>
         [SPACE] Throttle Down<br>
+        [B] Toggle Post-Processing<br>
         <b style="color:red">[F] FIRE WEAPON</b><br>
     </div>
 
@@ -391,6 +392,7 @@
         let myPlayerIndex = -1; 
         let netPlayers = []; 
         let gameActive = false;
+        let postProcessingEnabled = true;
         const inputState = {
             pitchDown: false, pitchUp: false,
             rollLeft: false, rollRight: false,
@@ -1987,6 +1989,7 @@
             if (code === 'ShiftLeft' || code === 'ShiftRight') inputState.throttleUp = state;
             if (code === 'Space') inputState.throttleDown = state;
             if (code === 'KeyF' || code === 'Enter') inputState.shoot = state;
+            if (code === 'KeyB' && state) postProcessingEnabled = !postProcessingEnabled;
 
             const me = players.find(p => p.index === myPlayerIndex);
             if(me) {
@@ -2239,23 +2242,27 @@
 
                 updateHUD(me);
                 
-                bloomComposer.passes[0].camera = me.camera;
-                finalComposer.passes[0].camera = me.camera;
+                if (postProcessingEnabled) {
+                    bloomComposer.passes[0].camera = me.camera;
+                    finalComposer.passes[0].camera = me.camera;
 
-                sky.visible = false;
-                const oldBg = scene.background;
-                scene.background = new THREE.Color(0x000000); 
-                
-                const oldFogC = scene.fog.color.clone();
-                scene.fog.color.set(0x000000); 
+                    sky.visible = false;
+                    const oldBg = scene.background;
+                    scene.background = new THREE.Color(0x000000); 
+                    
+                    const oldFogC = scene.fog.color.clone();
+                    scene.fog.color.set(0x000000); 
 
-                bloomComposer.render();
+                    bloomComposer.render();
 
-                sky.visible = true;
-                scene.background = oldBg;
-                scene.fog.color.copy(oldFogC); 
-                
-                finalComposer.render();
+                    sky.visible = true;
+                    scene.background = oldBg;
+                    scene.fog.color.copy(oldFogC); 
+                    
+                    finalComposer.render();
+                } else {
+                    renderer.render(scene, me.camera);
+                }
             } 
         }
 
