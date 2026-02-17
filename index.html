@@ -304,7 +304,7 @@
     <div class="hud-container" id="hud-main">
         <div class="hud-box">
             <h1 id="hud-name">PLAYER</h1>
-            <div class="stat">SPEED: <span id="speedVal">0</span> km/h</div>
+            <div class="stat">SPEED: <span id="speedVal">0</span> knots</div>
             <div class="stat">THROT: <span id="throtVal">0</span>%</div>
             <div class="stat">ALT: <span id="altVal">0</span> m</div>
             <div class="stat">HDG: <span id="headingVal">0</span>°</div>
@@ -1252,6 +1252,9 @@
                 this.positionBuffer = [];
                 this.respawnTimer = 0;
 
+                this.smoothedPitch = 0;
+                this.smoothedRoll = 0;
+
                 this.inputs = {
                     pitch: 0, 
                     roll: 0,
@@ -1534,10 +1537,25 @@
                 if (this.inputs.throttle === -1) this.throttle -= 0.01 * timeScale;
                 this.throttle = Math.max(0, Math.min(1, this.throttle));
 
-                const targetSpeed = this.throttle * maxSpeed;
-                const scaledAccel = acceleration * timeScale;
-                if (this.speed < targetSpeed) this.speed += scaledAccel;
-                else if (this.speed > targetSpeed) this.speed -= scaledAccel;
+                // --- Physics-based Speed Model ---
+                // 1. Thrust: Engine provides acceleration based on throttle
+                const thrust = this.throttle * acceleration * 1.45 * timeScale;
+                this.speed += thrust;
+
+                // 2. Gravity: Speed changes based on pitch (Energy exchange)
+                _tempVec.set(0, 0, -1).applyQuaternion(this.mesh.quaternion);
+                const pitchFactor = _tempVec.y; // Positive = Nose Up, Negative = Nose Down
+                this.speed -= pitchFactor * 0.01 * timeScale;
+
+                // 3. Parasitic Drag: Air resistance increases with speed squared
+                const parasiticDrag = (this.speed * this.speed) * 0.0028 * timeScale;
+                this.speed -= parasiticDrag;
+
+                // 4. Induced Drag: Speed loss due to maneuvering (turning/rolling)
+                const maneuveringDrag = (Math.abs(this.smoothedPitch) * 0.005 + Math.abs(this.smoothedRoll) * 0.002) * timeScale;
+                this.speed -= maneuveringDrag;
+
+                this.speed = Math.max(0.1, this.speed);
 
                 if (this.speed < stallSpeed) {
                     this.isStalled = true;
@@ -1548,11 +1566,16 @@
                     this.isStalled = false;
                 }
 
+                // Smooth out inputs
+                const lerpAlpha = 1.0 - Math.pow(0.88, timeScale); 
+                this.smoothedPitch = THREE.MathUtils.lerp(this.smoothedPitch, this.inputs.pitch, lerpAlpha);
+                this.smoothedRoll = THREE.MathUtils.lerp(this.smoothedRoll, this.inputs.roll, lerpAlpha);
+
                 let effectiveTurnSpeed = this.isStalled ? turnSpeed * 0.4 : turnSpeed;
                 const scaledTurn = effectiveTurnSpeed * timeScale;
 
-                if (this.inputs.pitch !== 0) this.mesh.rotateX(this.inputs.pitch * scaledTurn); 
-                if (this.inputs.roll !== 0) this.mesh.rotateZ(this.inputs.roll * scaledTurn * 6.0); 
+                if (Math.abs(this.smoothedPitch) > 0.001) this.mesh.rotateX(this.smoothedPitch * scaledTurn); 
+                if (Math.abs(this.smoothedRoll) > 0.001) this.mesh.rotateZ(this.smoothedRoll * scaledTurn * 6.0); 
 
                 this.mesh.translateZ(-this.speed * timeScale);
 
@@ -2017,7 +2040,7 @@
         }
 
         function updateHUD(me) {
-            document.getElementById('speedVal').innerText = Math.round(me.speed * 800);
+            document.getElementById('speedVal').innerText = Math.round(me.speed * 432);
             document.getElementById('throtVal').innerText = Math.round(me.throttle * 100);
             document.getElementById('hpVal').innerText = me.hp;
             
