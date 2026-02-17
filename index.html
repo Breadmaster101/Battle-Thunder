@@ -308,7 +308,7 @@
             <div class="stat">THROT: <span id="throtVal">0</span>%</div>
             <div class="stat">ALT: <span id="altVal">0</span> m</div>
             <div class="stat">HDG: <span id="headingVal">0</span>°</div>
-            <div class="stat" style="color:#ff4444">INTEGRITY: <span id="hpVal">100</span>%</div>
+            <div class="stat" style="color:#ff4444">HEALTH: <span id="hpVal">100</span>%</div>
             <div class="stat" id="stallWarn" style="color:red; display:none;">!! STALL !!</div>
             
             <div class="radar" id="radar">
@@ -1416,14 +1416,19 @@
                 return planeGroup;
             }
 
-            createTrail() {
-                const geo = new THREE.IcosahedronGeometry(0.5, 0);
-                const mat = new THREE.MeshBasicMaterial({ color: 0xdddddd, transparent: true, opacity: 0.4 });
+            createTrail(color = 0xdddddd, size = 0.5, opacity = 0.4) {
+                const geo = new THREE.IcosahedronGeometry(size, 0);
+                const mat = new THREE.MeshBasicMaterial({ color: color, transparent: true, opacity: opacity });
                 const mesh = new THREE.Mesh(geo, mat);
                 const pos = new THREE.Vector3(0, 0, 6.5).applyMatrix4(this.mesh.matrixWorld);
                 mesh.position.copy(pos);
                 scene.add(mesh);
-                this.trailParticles.push({ mesh: mesh, life: 1.0, velocity: new THREE.Vector3((Math.random()-0.5), (Math.random()-0.5), (Math.random()-0.5)).multiplyScalar(0.2) });
+                this.trailParticles.push({ 
+                    mesh: mesh, 
+                    life: 1.0, 
+                    baseOpacity: opacity,
+                    velocity: new THREE.Vector3((Math.random()-0.5), (Math.random()-0.5), (Math.random()-0.5)).multiplyScalar(0.2) 
+                });
             }
 
             explode() {
@@ -1706,14 +1711,17 @@
                     this.engineSound.stop();
                 }
 
-                if (!this.isCrashed && this.speed > 0.5 && Math.random() > 0.6) this.createTrail();
+                if (!this.isCrashed && this.speed > 0.5) {
+                    if (Math.random() > 0.6) this.createTrail();
+                    if (this.hp < 50 && Math.random() > 0.4) this.createTrail(0x222222, 0.8, 0.7);
+                }
                 
                 for (let i = this.trailParticles.length - 1; i >= 0; i--) {
                     const p = this.trailParticles[i];
                     p.life -= 0.02 * timeScale;
                     p.mesh.position.addScaledVector(p.velocity, timeScale);
                     p.mesh.scale.multiplyScalar(1.0 + (0.05 * timeScale));
-                    p.mesh.material.opacity = p.life * 0.4;
+                    p.mesh.material.opacity = p.life * (p.baseOpacity || 0.4);
                     if (p.life <= 0) {
                         scene.remove(p.mesh);
                         this.trailParticles.splice(i, 1);
