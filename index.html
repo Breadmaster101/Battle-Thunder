@@ -689,6 +689,54 @@
         const AudioContext = window.AudioContext || window.webkitAudioContext;
         const audioCtx = new AudioContext();
 
+        // Master FX Chain
+        const masterCompressor = audioCtx.createDynamicsCompressor();
+        masterCompressor.threshold.setValueAtTime(-24, audioCtx.currentTime);
+        masterCompressor.knee.setValueAtTime(30, audioCtx.currentTime);
+        masterCompressor.ratio.setValueAtTime(12, audioCtx.currentTime);
+        masterCompressor.attack.setValueAtTime(0.003, audioCtx.currentTime);
+        masterCompressor.release.setValueAtTime(0.25, audioCtx.currentTime);
+        masterCompressor.connect(audioCtx.destination);
+
+        // Simple Convolution Reverb
+        const reverbDuration = 2.0;
+        const reverbBuffer = audioCtx.createBuffer(2, audioCtx.sampleRate * reverbDuration, audioCtx.sampleRate);
+        for(let i=0; i<reverbBuffer.length; i++) {
+             // Exponential decay noise
+             const decay = Math.pow(1 - i / reverbBuffer.length, 3.0);
+             reverbBuffer.getChannelData(0)[i] = (Math.random() * 2 - 1) * decay;
+             reverbBuffer.getChannelData(1)[i] = (Math.random() * 2 - 1) * decay;
+        }
+        const masterReverb = audioCtx.createConvolver();
+        masterReverb.buffer = reverbBuffer;
+        const reverbMix = audioCtx.createGain();
+        reverbMix.gain.value = 0.35;
+        masterReverb.connect(reverbMix);
+        reverbMix.connect(masterCompressor);
+
+        // Noise Factory
+        function createNoiseBuffer(dur=1) {
+            const sz = audioCtx.sampleRate * dur;
+            const b = audioCtx.createBuffer(1, sz, audioCtx.sampleRate);
+            const d = b.getChannelData(0);
+            for(let i=0; i<sz; i++) d[i] = Math.random()*2-1;
+            return b;
+        }
+        const noiseBuf1 = createNoiseBuffer(1.0);
+        const noiseBufLoop = createNoiseBuffer(5.0);
+
+        function makeDistortionCurve(amount) {
+            const k = typeof amount === 'number' ? amount : 50,
+                n_samples = 44100,
+                curve = new Float32Array(n_samples);
+            let i = 0, x;
+            for ( ; i < n_samples; ++i ) {
+                x = i * 2 / n_samples - 1;
+                curve[i] = ( 3 + k ) * x * 20 * (Math.PI / 180) / ( Math.PI + k * Math.abs(x) );
+            }
+            return curve;
+        }
+
         function resumeAudio() {
             if (audioCtx.state === 'suspended') {
                 audioCtx.resume();
@@ -699,60 +747,233 @@
 
         const SoundGen = {
             playShoot: () => {
+                const t = audioCtx.currentTime;
+                // Bass punch
                 const osc = audioCtx.createOscillator();
-                const gain = audioCtx.createGain();
-                osc.type = 'square';
-                osc.frequency.setValueAtTime(400, audioCtx.currentTime);
-                osc.frequency.exponentialRampToValueAtTime(100, audioCtx.currentTime + 0.1);
-                gain.gain.setValueAtTime(0.1, audioCtx.currentTime);
-                gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.1);
-                osc.connect(gain);
-                gain.connect(audioCtx.destination);
-                osc.start();
-                osc.stop(audioCtx.currentTime + 0.15);
+                const g = audioCtx.createGain();
+                osc.frequency.setValueAtTime(150, t);
+                osc.frequency.exponentialRampToValueAtTime(40, t+0.08);
+                g.gain.setValueAtTime(0.6, t);
+                g.gain.exponentialRampToValueAtTime(0.01, t+0.1);
+                osc.connect(g); g.connect(masterCompressor);
+                osc.start(t); osc.stop(t+0.1);
+
+                // Metallic transient
+                const m = audioCtx.createOscillator();
+                m.type = 'triangle';
+                const mg = audioCtx.createGain();
+                m.frequency.setValueAtTime(1200, t);
+                m.frequency.exponentialRampToValueAtTime(400, t+0.04);
+                mg.gain.setValueAtTime(0.3, t);
+                mg.gain.exponentialRampToValueAtTime(0.01, t+0.05);
+                m.connect(mg); mg.connect(masterCompressor);
+                m.start(t); m.stop(t+0.05);
+
+                // Gunshot blast
+                const n = audioCtx.createBufferSource();
+                n.buffer = noiseBuf1;
+                const f = audioCtx.createBiquadFilter();
+                f.type = 'lowpass';
+                f.frequency.setValueAtTime(4000, t);
+                f.frequency.exponentialRampToValueAtTime(800, t+0.15);
+                const ng = audioCtx.createGain();
+                ng.gain.setValueAtTime(1.0, t);
+                ng.gain.exponentialRampToValueAtTime(0.01, t+0.25);
+                n.connect(f); f.connect(ng); 
+                ng.connect(masterCompressor); 
+                ng.connect(masterReverb);
+                n.start(t); n.stop(t+0.25);
             },
             playExplosion: () => {
-                const bufferSize = audioCtx.sampleRate * 1.0; 
-                const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
-                const data = buffer.getChannelData(0);
-                for (let i = 0; i < bufferSize; i++) {
-                    data[i] = Math.random() * 2 - 1;
-                }
-                const noise = audioCtx.createBufferSource();
-                noise.buffer = buffer;
-                const gain = audioCtx.createGain();
-                gain.gain.setValueAtTime(0.3, audioCtx.currentTime);
-                gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.8);
-                noise.connect(gain);
-                gain.connect(audioCtx.destination);
-                noise.start();
+                const t = audioCtx.currentTime;
+                // Sub impact
+                const osc = audioCtx.createOscillator();
+                const g = audioCtx.createGain();
+                osc.frequency.setValueAtTime(80, t);
+                osc.frequency.exponentialRampToValueAtTime(10, t+1.5);
+                g.gain.setValueAtTime(2.0, t);
+                g.gain.exponentialRampToValueAtTime(0.01, t+2.0);
+                osc.connect(g); g.connect(masterCompressor);
+                osc.start(t); osc.stop(t+2.0);
+
+                // Debris noise
+                const n = audioCtx.createBufferSource();
+                n.buffer = noiseBufLoop;
+                const f = audioCtx.createBiquadFilter();
+                f.type = 'lowpass';
+                f.frequency.setValueAtTime(1200, t);
+                f.frequency.linearRampToValueAtTime(50, t+2.5);
+                const ng = audioCtx.createGain();
+                ng.gain.setValueAtTime(2.0, t);
+                ng.gain.exponentialRampToValueAtTime(0.01, t+3.0);
+                n.connect(f); f.connect(ng);
+                ng.connect(masterCompressor);
+                ng.connect(masterReverb);
+                n.start(t); n.stop(t+3.0);
             }
         };
 
         class EngineSound {
-            constructor() {
-                this.osc = audioCtx.createOscillator();
+            constructor(isLocal) {
+                this.isLocal = isLocal;
+                const t = audioCtx.currentTime;
+                
+                // Master Gain for this plane
                 this.gain = audioCtx.createGain();
-                this.filter = audioCtx.createBiquadFilter();
-                this.osc.type = 'sawtooth';
-                this.filter.type = 'lowpass';
-                this.filter.frequency.value = 400;
-                this.osc.connect(this.filter);
-                this.filter.connect(this.gain);
-                this.gain.connect(audioCtx.destination);
-                this.gain.gain.value = 0;
-                this.osc.start();
+                this.gain.gain.value = 1.0;
+                
+                // 3D Spatialization
+                if (!isLocal) {
+                    this.panner = audioCtx.createPanner();
+                    this.panner.panningModel = 'HRTF';
+                    this.panner.distanceModel = 'inverse'; 
+                    this.panner.refDistance = 50;
+                    this.panner.maxDistance = 8000;
+                    this.panner.rolloffFactor = 1.0;
+                    this.gain.connect(this.panner);
+                    this.panner.connect(masterCompressor);
+                } else {
+                    this.gain.connect(masterCompressor);
+                }
+
+                // --- Sound Layers ---
+
+                // 1. Fundamental "Thrum" (The body vibration)
+                this.rumbleOsc = audioCtx.createOscillator();
+                this.rumbleOsc.type = 'triangle'; // Smoother low end
+                this.rumbleGain = audioCtx.createGain();
+                this.rumbleOsc.connect(this.rumbleGain);
+                this.rumbleGain.connect(this.gain);
+
+                // 2. Combustion "Growl" (The aggressive engine tone)
+                // Sawtooth -> Distortion -> Filter gives a nice "engine" texture
+                this.growlOsc = audioCtx.createOscillator();
+                this.growlOsc.type = 'sawtooth';
+                
+                this.growlDistortion = audioCtx.createWaveShaper();
+                this.growlDistortion.curve = makeDistortionCurve(150); // Reduced distortion for smoother sound
+                
+                this.growlFilter = audioCtx.createBiquadFilter();
+                this.growlFilter.type = 'lowpass';
+                this.growlFilter.Q.value = 1.0;
+                
+                this.growlGain = audioCtx.createGain();
+
+                this.growlOsc.connect(this.growlDistortion);
+                this.growlDistortion.connect(this.growlFilter);
+                this.growlFilter.connect(this.growlGain);
+                this.growlGain.connect(this.gain);
+
+                // 3. Propeller "Chop" (Air displacement)
+                // Filtered noise modulated by an LFO to create the "thwop-thwop"
+                this.propNoise = audioCtx.createBufferSource();
+                this.propNoise.buffer = noiseBufLoop; 
+                this.propNoise.loop = true;
+                
+                this.propFilter = audioCtx.createBiquadFilter();
+                this.propFilter.type = 'lowpass';
+                
+                this.propGate = audioCtx.createGain(); // This will be modulated
+                this.propGain = audioCtx.createGain(); // Output level
+                
+                this.propLFO = audioCtx.createOscillator();
+                this.propLFO.type = 'sine';
+
+                this.propNoise.connect(this.propFilter);
+                this.propFilter.connect(this.propGate);
+                this.propGate.connect(this.propGain);
+                this.propGain.connect(this.gain);
+                
+                // Connect LFO to Gate Gain for AM synthesis
+                this.propLFO.connect(this.propGate.gain);
+
+                // 4. Turbo/Supercharger Whine
+                this.whineOsc = audioCtx.createOscillator();
+                this.whineOsc.type = 'sine';
+                this.whineGain = audioCtx.createGain();
+                this.whineOsc.connect(this.whineGain);
+                this.whineGain.connect(this.gain);
+
+                // 5. Wind / Air Resistance
+                this.windNode = audioCtx.createBufferSource();
+                this.windNode.buffer = noiseBufLoop;
+                this.windNode.loop = true;
+                this.windFilter = audioCtx.createBiquadFilter();
+                this.windFilter.type = 'highpass';
+                this.windGain = audioCtx.createGain();
+                
+                this.windNode.connect(this.windFilter);
+                this.windFilter.connect(this.windGain);
+                this.windGain.connect(this.gain);
+
+                // Start Everything
+                const now = audioCtx.currentTime;
+                this.rumbleOsc.start(now);
+                this.growlOsc.start(now);
+                this.propNoise.start(now);
+                this.propLFO.start(now);
+                this.whineOsc.start(now);
+                this.windNode.start(now);
+
+                // Initial Silence
+                this.rumbleGain.gain.value = 0;
+                this.growlGain.gain.value = 0;
+                this.propGain.gain.value = 0;
+                this.whineGain.gain.value = 0;
+                this.windGain.gain.value = 0;
             }
-            update(speed, throttle) {
-                const baseFreq = 60;
-                this.osc.frequency.setTargetAtTime(baseFreq + (speed * 40), audioCtx.currentTime, 0.1);
-                const vol = Math.max(0, throttle * 0.15);
-                this.gain.gain.setTargetAtTime(vol, audioCtx.currentTime, 0.1);
+
+            update(speed, throttle, pos) {
+                const t = audioCtx.currentTime;
+                const dt = 0.1; // Slower, smoother transitions
+
+                // Calculate RPM (Simulated)
+                const baseRPM = 800 + (throttle * 2000);
+                const rpm = baseRPM + (speed * 100);
+                const rps = rpm / 60;
+
+                // 1. Rumble Logic (Low-end body)
+                this.rumbleOsc.frequency.setTargetAtTime(rps * 3.0, t, dt); 
+                this.rumbleGain.gain.setTargetAtTime(0.2 + (throttle * 0.2), t, dt);
+
+                // 2. Growl Logic (Engine texture)
+                this.growlOsc.frequency.setTargetAtTime(rps * 6.0, t, dt); 
+                // Filter is more restrictive to keep it smooth
+                this.growlFilter.frequency.setTargetAtTime(300 + (throttle * 1200), t, dt);
+                this.growlGain.gain.setTargetAtTime(0.08 + (throttle * 0.12), t, dt);
+
+                // 3. Propeller Chop Logic
+                this.propLFO.frequency.setTargetAtTime(rps * 3, t, dt);
+                this.propFilter.frequency.setTargetAtTime(600 + (throttle * 400), t, dt);
+                this.propGain.gain.setTargetAtTime(0.15 + (throttle * 0.2), t, dt);
+
+                // 4. Whine Logic (High frequency) - Significantly lowered
+                this.whineOsc.frequency.setTargetAtTime(rps * 16, t, dt);
+                this.whineGain.gain.setTargetAtTime(0.01 * throttle, t, dt);
+
+                // 5. Wind Logic - Drastically reduced for comfort
+                const windFreq = 1200 + (speed * 800);
+                this.windFilter.frequency.setTargetAtTime(windFreq, t, dt);
+                const windVol = Math.max(0, (speed - 1.2) * 0.01); // Extremely quiet, only at high speed
+                this.windGain.gain.setTargetAtTime(windVol, t, dt);
+
+                // Spatialization
+                if (!this.isLocal && this.panner && pos) {
+                    this.panner.positionX.setTargetAtTime(pos.x, t, 0.1);
+                    this.panner.positionY.setTargetAtTime(pos.y, t, 0.1);
+                    this.panner.positionZ.setTargetAtTime(pos.z, t, 0.1);
+                }
             }
+
             stop() {
-                this.gain.gain.setTargetAtTime(0, audioCtx.currentTime, 0.2);
+                // Fade out
+                this.gain.gain.setTargetAtTime(0, audioCtx.currentTime, 0.3);
             }
-            restart() {}
+
+            restart() {
+                // Fade in
+                this.gain.gain.setTargetAtTime(1.0, audioCtx.currentTime, 0.1);
+            }
         }
 
         window.goToMenu = function() {
@@ -994,10 +1215,11 @@
         }
 
         class Player {
-            constructor(config) {
+            constructor(config, isLocal) {
                 this.index = config.index;
                 this.socketId = config.id;
                 this.name = config.name;
+                this.isLocal = isLocal;
                 
                 const planePalette = [
                     0xFF0000, 
@@ -1038,7 +1260,7 @@
                     reset: false
                 };
 
-                this.engineSound = new EngineSound();
+                this.engineSound = new EngineSound(isLocal);
                 this.camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 5.0, 12000);
                 this.mesh = this.createPlaneMesh(this.color);
                 
@@ -1477,15 +1699,11 @@
 
                 if(this.propeller && !this.isCrashed) this.propeller.rotation.z += (0.3 + (this.speed * 0.5)) * timeScale;
                 
-                if(this.index === myPlayerIndex) {
-                    this.engineSound.update(this.speed, this.throttle);
+                // Update Engine Sound
+                if (!this.isCrashed) {
+                    this.engineSound.update(this.speed, this.throttle, this.mesh.position);
                 } else {
-                    const me = players.find(p => p.index === myPlayerIndex);
-                    if(me && me.mesh) {
-                        const dist = this.mesh.position.distanceTo(me.mesh.position);
-                        const vol = Math.max(0, (1.0 - (dist/500)) * (this.throttle * 0.15));
-                        this.engineSound.gain.gain.setTargetAtTime(vol, audioCtx.currentTime, 0.1);
-                    }
+                    this.engineSound.stop();
                 }
 
                 if (!this.isCrashed && this.speed > 0.5 && Math.random() > 0.6) this.createTrail();
@@ -1669,8 +1887,9 @@
 
             players = []; 
             playerList.forEach(p => {
-                players.push(new Player(p));
-                if (p.id === socket.id) {
+                const isLocal = (p.id === socket.id);
+                players.push(new Player(p, isLocal));
+                if (isLocal) {
                     myPlayerIndex = p.index;
                 }
             });
@@ -1965,6 +2184,24 @@
                 me.camera.position.lerp(_tempVec, lerpFactor);
                 _tempDiff.set(0, 0, -30).applyMatrix4(me.mesh.matrixWorld);
                 me.camera.lookAt(_tempDiff);
+
+                if(audioCtx.listener.positionX) {
+                    const camPos = me.camera.position;
+                    const camQuat = me.camera.quaternion;
+                    const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camQuat);
+                    const up = new THREE.Vector3(0, 1, 0).applyQuaternion(camQuat);
+
+                    const t = audioCtx.currentTime;
+                    audioCtx.listener.positionX.setTargetAtTime(camPos.x, t, 0.1);
+                    audioCtx.listener.positionY.setTargetAtTime(camPos.y, t, 0.1);
+                    audioCtx.listener.positionZ.setTargetAtTime(camPos.z, t, 0.1);
+                    audioCtx.listener.forwardX.setTargetAtTime(forward.x, t, 0.1);
+                    audioCtx.listener.forwardY.setTargetAtTime(forward.y, t, 0.1);
+                    audioCtx.listener.forwardZ.setTargetAtTime(forward.z, t, 0.1);
+                    audioCtx.listener.upX.setTargetAtTime(up.x, t, 0.1);
+                    audioCtx.listener.upY.setTargetAtTime(up.y, t, 0.1);
+                    audioCtx.listener.upZ.setTargetAtTime(up.z, t, 0.1);
+                }
 
                 updateHUD(me);
                 
