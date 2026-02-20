@@ -2590,6 +2590,7 @@
                 
                 if (postProcessingEnabled) {
                     renderer.toneMappingExposure = 0.5;
+                    sky.material.uniforms['rayleigh'].value = 2.5;
                     bloomComposer.passes[0].camera = me.camera;
                     finalComposer.passes[0].camera = me.camera;
 
@@ -2609,6 +2610,7 @@
                     finalComposer.render();
                 } else {
                     renderer.toneMappingExposure = 0.8;
+                    sky.material.uniforms['rayleigh'].value = 1.4;
                     renderer.render(scene, me.camera);
                 }
             } 
