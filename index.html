@@ -2589,6 +2589,7 @@
                 updateHUD(me);
                 
                 if (postProcessingEnabled) {
+                    renderer.toneMappingExposure = 0.5;
                     bloomComposer.passes[0].camera = me.camera;
                     finalComposer.passes[0].camera = me.camera;
 
@@ -2607,6 +2608,7 @@
                     
                     finalComposer.render();
                 } else {
+                    renderer.toneMappingExposure = 0.8;
                     renderer.render(scene, me.camera);
                 }
             } 
