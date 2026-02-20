@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Battle Thunder - Nordic Operations</title>
+    <title>Battle Thunder</title>
     <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
     <style>
         body { margin: 0; overflow: hidden; font-family: 'Courier New', Courier, monospace; background: #000; }
@@ -376,7 +376,7 @@
             width: 12000, 
             segments: 196, 
             waterLevel: 55,
-            treeCount: 25000, 
+            treeCount: 20000, 
             shadowRes: 512, 
             fogDensity: 0.00015,
             lodDistance: 2000
@@ -405,7 +405,7 @@
         let pendingHits = [];
 
         let scene, renderer;
-        let water; 
+        let waterMeshes = []; 
         let sky; 
         let bloomComposer, finalComposer; 
         const clock = new THREE.Clock();
@@ -456,24 +456,72 @@
             return x * x * (3 - 2 * x);
         }
 
+        // --- TERRAIN GENERATION LOGIC: SCOTTISH HIGHLANDS ---
         function getTerrainHeight(x, z) {
-            let y = 0;
-            let amp = 160;
-            let freq = 0.0005;
-            for(let k=0; k<6; k++) {
-                y += simplex.noise(x * freq + mapSeed, z * freq + mapSeed) * amp;
+            // Normalized coordinates (-0.5 to 0.5)
+            const nx = x / CONFIG.width;
+            const nz = z / CONFIG.width;
+
+            // 1. The Great Glen Fault Line
+            const faultLine = Math.abs(nx + nz); 
+            const glenTrench = smoothstep(0.0, 0.08, faultLine);
+
+            // 2. Base Highlands (Rolling Moors)
+            let moors = simplex.noise(nx * 1.5 + mapSeed, nz * 1.5 + mapSeed) * 70;
+            moors += simplex.noise(nx * 4.0, nz * 4.0) * 25;
+
+            // 3. Munros (Mountains) - Ridged Multifractal Noise
+            let mountainMask = smoothstep(0.02, 0.25, faultLine); 
+            
+            let freq = 2.0;
+            let amp = 600.0;
+            let peaks = 0;
+            let weight = 1.0;
+            for(let i = 0; i < 6; i++) {
+                let n = 1.0 - Math.abs(simplex.noise(nx * freq + 100, nz * freq + 100));
+                n = n * n; // Sharpen ridges
+                n *= weight; // Higher ridges lift subsequent detail layers
+                weight = Math.max(0.0, Math.min(1.0, n * 2.5));
+                peaks += n * amp;
                 amp *= 0.45;
-                freq *= 2.1;
-                if(k === 0) y *= 2.0;
+                freq *= 2.2;
             }
-            
-            const riverPath = Math.sin(z * 0.0008) * 400 + Math.sin(z * 0.002) * 100;
-            const dist = Math.abs(x - riverPath);
-            const channelWidth = 350;
-            const channelFactor = smoothstep(0, channelWidth, dist);
-            
-            y = THREE.MathUtils.lerp(CONFIG.waterLevel - 35, y + 50, Math.pow(channelFactor, 1.8));
-            return y;
+
+            let height = moors + (peaks * mountainMask);
+
+            // 4. Glacial Erosion (U-Shaped Valleys)
+            let valleyNoise = simplex.noise(nx * 3.0 + 50, nz * 3.0 + 50);
+            // Power of 0.2 creates wide, flat valley bottoms with steep cliff walls
+            let valleyShape = 1.0 - Math.pow(Math.abs(valleyNoise), 0.2);
+            height *= (valleyShape * 0.8 + 0.2);
+
+            // 5. High-Altitude Corries (Mountain Tarns / Scoops) -- REMOVED TO ELIMINATE CRATERS
+            // let corrieNoise = simplex.noise(nx * 15.0 + 200, nz * 15.0 + 200);
+            // let corrie = smoothstep(0.75, 0.9, corrieNoise);
+            // height -= corrie * 70.0; // Scoop out bowls in the terrain
+
+            // 6. High-frequency Crags on Peaks (Rocky outcrops)
+            let crags = simplex.noise(nx * 20.0, nz * 20.0) * 20;
+            height += crags * Math.max(0, (height / 200.0));
+
+            // 7. Carve the Great Glen Loch
+            height = THREE.MathUtils.lerp(CONFIG.waterLevel - 100, height, glenTrench);
+
+            // 8. Base terrain height offset
+            height += 30;
+
+            // 9. Edge constraint & Coastal Fjords (Sea Lochs)
+            const distFromCenter = Math.sqrt(nx*nx + nz*nz);
+            const edgeDist = 0.45; 
+            if (distFromCenter > edgeDist) {
+                const falloff = smoothstep(edgeDist, 0.495, distFromCenter);
+                // Where the fault line hits the edge, drop dramatically into a sea fjord
+                const fjordMouth = 1.0 - smoothstep(0.0, 0.12, faultLine);
+                const dropTarget = -100 - (fjordMouth * 250);
+                height = THREE.MathUtils.lerp(height, dropTarget, falloff);
+            }
+
+            return height;
         }
 
         function createNoiseTexture(type) {
@@ -493,16 +541,16 @@
 
             let baseC, noiseFreq;
             if (type === 'grass') {
-                baseC = new THREE.Color('#1c2113'); 
+                baseC = new THREE.Color('#343a2e'); 
                 noiseFreq = 4.0;
             } else if (type === 'rock') {
-                baseC = new THREE.Color('#222020');
-                noiseFreq = 15.0;
+                baseC = new THREE.Color('#4a4a4a'); 
+                noiseFreq = 15.0; // High frequency for granite
             } else if (type === 'snow') {
                 baseC = new THREE.Color('#eef2f5');
                 noiseFreq = 2.0;
             } else {
-                baseC = new THREE.Color('#8888ff'); 
+                baseC = new THREE.Color('#0a0806'); 
                 noiseFreq = 8.0; 
             }
 
@@ -511,15 +559,42 @@
                 const y = Math.floor(i / size) / size;
                 
                 let n = 0, amp = 1, freq = noiseFreq;
-                for(let k=0; k<4; k++) {
-                    n += simplexTex.noise(x*freq, y*freq) * amp;
-                    amp *= 0.5;
-                    freq *= 2.0;
+                
+                if (type === 'grass') {
+                    // Tussock bump math: invert absolute noise
+                    for(let k=0; k<5; k++) {
+                        let raw = simplexTex.noise(x*freq, y*freq);
+                        let clump = 1.0 - Math.abs(raw);
+                        clump = clump * clump; 
+                        n += clump * amp;
+                        amp *= 0.45;
+                        freq *= 2.5;
+                    }
+                    n = (n - 0.5) * 1.5; 
+                } else if (type === 'rock') {
+                    // Granite Cracks: Ridged Multifractal
+                    // Create sharp, jagged fissures
+                    for(let k=0; k<5; k++) {
+                        let raw = simplexTex.noise(x*freq + 50, y*freq + 50);
+                        // Sharp ridges
+                        let ridge = 1.0 - Math.abs(raw);
+                        ridge = ridge * ridge * ridge; // Very sharp peaks
+                        n += ridge * amp;
+                        amp *= 0.55; // Slower falloff to keep detail
+                        freq *= 2.0;
+                    }
+                    n = (n - 0.4) * 2.5; // High contrast
+                } else {
+                    for(let k=0; k<4; k++) {
+                        n += simplexTex.noise(x*freq, y*freq) * amp;
+                        amp *= 0.5;
+                        freq *= 2.0;
+                    }
                 }
                 
                 const c = baseC.clone();
                 if(type === 'rock') c.offsetHSL(0, 0, n * 0.15);
-                if(type === 'grass') c.offsetHSL(0.02, 0.1, n * 0.1);
+                if(type === 'grass') c.offsetHSL(0.02, 0.05, n * 0.1); 
                 
                 const idx = i * 4;
                 data[idx] = c.r * 255;
@@ -540,7 +615,8 @@
             const ctxN = canvasN.getContext('2d');
             const dataN = ctxN.createImageData(size, size);
             const dN = dataN.data;
-            const strength = type === 'rock' ? 8.0 : (type === 'water' ? 3.0 : 2.0);
+            
+            const strength = type === 'rock' ? 12.0 : (type === 'grass' ? 6.0 : (type === 'water' ? 3.0 : 2.0));
 
             for(let y=0; y<size; y++) {
                 for(let x=0; x<size; x++) {
@@ -570,21 +646,112 @@
         }
 
         const matGrass = createNoiseTexture('grass');
+        const matRock = createNoiseTexture('rock'); 
         const matWater = createNoiseTexture('water'); 
 
         function generateBakedTerrainTexture(treePositions, gameSeed) {
             const res = 2048;
+            const sRes = 1024; 
+            const shadowMap = new Float32Array(sRes * sRes);
+            const sunDir = new THREE.Vector3().copy(sunLight.position).normalize();
+            
+            // 1. Pre-calculate terrain heights for fast raymarching
+            const heights = new Float32Array(sRes * sRes);
+            for(let i=0; i<sRes*sRes; i++) {
+                const wx = ((i % sRes) / sRes - 0.5) * CONFIG.width;
+                const wz = (Math.floor(i / sRes) / sRes - 0.5) * CONFIG.width;
+                heights[i] = getTerrainHeight(wx, wz);
+            }
+
+            // 2. Prepare fast grid for tree lookups
+            const gridW = Math.ceil(CONFIG.width / TREE_GRID_SIZE) + 2;
+            const fastGrid = new Array(gridW * gridW);
+            const gridOffset = Math.floor(gridW / 2);
+            for (let [key, val] of treeGrid) {
+                const parts = key.split(',');
+                const gx = parseInt(parts[0]) + gridOffset;
+                const gz = parseInt(parts[1]) + gridOffset;
+                if (gx >= 0 && gx < gridW && gz >= 0 && gz < gridW) {
+                    fastGrid[gz * gridW + gx] = val;
+                }
+            }
+
+            // 3. Raymarch for Terrain + Tree shadows
+            for(let sy=0; sy<sRes; sy++) {
+                for(let sx=0; sx<sRes; sx++) {
+                    const h = heights[sy * sRes + sx];
+                    let shadow = 1.0;
+                    
+                    let currX = ((sx / sRes) - 0.5) * CONFIG.width;
+                    let currY = h + 2.0;
+                    let currZ = ((sy / sRes) - 0.5) * CONFIG.width;
+                    
+                    const stepSize = 12.0; 
+                    for(let step=0; step<60; step++) {
+                        currX += sunDir.x * stepSize;
+                        currY += sunDir.y * stepSize;
+                        currZ += sunDir.z * stepSize;
+                        
+                        // Terrain check (fast lookup)
+                        const lsx = Math.floor(((currX / CONFIG.width) + 0.5) * sRes);
+                        const lsy = Math.floor(((currZ / CONFIG.width) + 0.5) * sRes);
+                        if (lsx >= 0 && lsx < sRes && lsy >= 0 && lsy < sRes) {
+                            if (currY < heights[lsy * sRes + lsx]) {
+                                shadow = 0.3; break;
+                            }
+                        }
+
+                        // Tree check (fast grid)
+                        if (currY < 500) {
+                            const gx = Math.floor(currX / TREE_GRID_SIZE) + gridOffset;
+                            const gz = Math.floor(currZ / TREE_GRID_SIZE) + gridOffset;
+                            if (gx >= 0 && gx < gridW && gz >= 0 && gz < gridW) {
+                                const cell = fastGrid[gz * gridW + gx];
+                                if (cell) {
+                                    for (let k=0; k<cell.length; k++) {
+                                        const t = cell[k];
+                                        if (currY < t.y + t.h && currY > t.y) {
+                                            const dx = currX - t.x;
+                                            const dz = currZ - t.z;
+                                            if (dx*dx + dz*dz < (t.r * 1.2)**2) {
+                                                shadow = 0.3; break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if (shadow < 1.0) break;
+                        if (currY > 800) break;
+                    }
+                    shadowMap[sy * sRes + sx] = shadow;
+                }
+            }
+
+            // Diffuse Canvas
             const canvas = document.createElement('canvas');
             canvas.width = res;
             canvas.height = res;
             const ctx = canvas.getContext('2d');
-            
             const imgData = ctx.createImageData(res, res);
             const data = imgData.data;
+
+            // Roughness Canvas
+            const rCanvas = document.createElement('canvas');
+            rCanvas.width = res;
+            rCanvas.height = res;
+            const rCtx = rCanvas.getContext('2d');
+            const rImgData = rCtx.createImageData(res, res);
+            const rData = rImgData.data;
             
-            const cGrass = { r: 28, g: 33, b: 19 };
-            const cRock = { r: 34, g: 32, b: 32 };
-            const cSnow = { r: 238, g: 242, b: 245 };
+            // Authentic Muted Scottish Palette
+            const cGrass = { r: 62, g: 74, b: 48 };      // Vibrant yet dark Highland grass
+            const cBracken = { r: 120, g: 75, b: 40 };   // Rusty orange autumn bracken
+            const cHeather = { r: 90, g: 65, b: 85 };    // Blooming purple heather
+            const cPeat = { r: 40, g: 35, b: 32 };       // Dark peat bogs
+            const cRock = { r: 70, g: 73, b: 78 };       // Dark granite/basalt
+            const cSnow = { r: 190, g: 195, b: 200 };
+            const cWater = { r: 15, g: 18, b: 22 };
             
             const texRng = createSeededRNG(gameSeed + 999);
 
@@ -594,96 +761,152 @@
                 const wx = (ix / res - 0.5) * CONFIG.width;
                 const wz = (iy / res - 0.5) * CONFIG.width;
                 
+                const nx = wx / CONFIG.width;
+                const nz = wz / CONFIG.width;
+
                 const h = getTerrainHeight(wx, wz); 
                 const h2 = getTerrainHeight(wx + 5, wz);
-                const slope = Math.abs(h - h2);
+                const h3 = getTerrainHeight(wx, wz + 5);
+                const slope = Math.sqrt(Math.pow(h - h2, 2) + Math.pow(h - h3, 2));
                 
                 let r, g, b;
-                const rockFactor = Math.min(1, Math.max(0, (slope - 1.5) * 0.8));
-                r = cGrass.r * (1-rockFactor) + cRock.r * rockFactor;
-                g = cGrass.g * (1-rockFactor) + cRock.g * rockFactor;
-                b = cGrass.b * (1-rockFactor) + cRock.b * rockFactor;
+                let roughness = 0.9; // Base matte roughness
+
+                // Noise Maps
+                const brackenNoise = (simplex.noise(wx * 0.003, wz * 0.003) + 1) * 0.5; 
+                const heatherNoise = (simplex.noise(wx * 0.002, wz * 0.002) + 1) * 0.5; 
+                const peatNoise = (simplex.noise(wx * 0.005 + 100, wz * 0.005 + 100) + 1) * 0.5;
+
+                // Feature Detectors
+                // let corrieNoise = simplex.noise(nx * 15.0 + 200, nz * 15.0 + 200);
+                let isTarnShore = false; // corrieNoise > 0.85; (Disabled as craters are removed)
+
+                // --- LAYER BLENDING ---
+
+                // Base layer is Grass
+                r = cGrass.r; g = cGrass.g; b = cGrass.b;
+
+                // Blend Peat (Lower flat areas, wet)
+                const peatElevationFactor = Math.max(0, 1.0 - (h / 150.0));
+                const finalPeat = Math.max(0, Math.min(1, peatNoise * peatElevationFactor));
+                r = r * (1 - finalPeat) + cPeat.r * finalPeat;
+                g = g * (1 - finalPeat) + cPeat.g * finalPeat;
+                b = b * (1 - finalPeat) + cPeat.b * finalPeat;
+                roughness = roughness * (1 - finalPeat) + 0.3 * finalPeat; 
+
+                // Blend Autumn Bracken (Ferns thrive on lower-to-mid slopes)
+                const brackenElevationFactor = 1.0 - Math.min(1.0, Math.abs(h - 120) / 100.0);
+                const finalBracken = Math.max(0, Math.min(1, brackenNoise * brackenElevationFactor * 2.0));
+                r = r * (1 - finalBracken) + cBracken.r * finalBracken;
+                g = g * (1 - finalBracken) + cBracken.g * finalBracken;
+                b = b * (1 - finalBracken) + cBracken.b * finalBracken;
+
+                // Blend Heather (Thrives on mid-to-high slopes)
+                const heatherElevationFactor = 1.0 - Math.min(1.0, Math.abs(h - 300) / 200.0);
+                const finalHeather = Math.max(0, Math.min(1, heatherNoise * heatherElevationFactor * 2.0));
+                r = r * (1 - finalHeather) + cHeather.r * finalHeather;
+                g = g * (1 - finalHeather) + cHeather.g * finalHeather;
+                b = b * (1 - finalHeather) + cHeather.b * finalHeather;
+
+                // Blend Rock (exposed granite) on steep slopes
+                const slopeFactor = smoothstep(1.0, 3.5, slope);
+                r = r * (1 - slopeFactor) + cRock.r * slopeFactor;
+                g = g * (1 - slopeFactor) + cRock.g * slopeFactor;
+                b = b * (1 - slopeFactor) + cRock.b * slopeFactor;
+                roughness = roughness * (1 - slopeFactor) + 0.4 * slopeFactor; // Wet slick rock
                 
-                if (h > 210) {
-                    const snowNoise = texRng.random() * 20; 
-                    const snowFactor = Math.min(1, Math.max(0, (h - (220 + snowNoise)) * 0.1));
-                    r = r * (1-snowFactor) + cSnow.r * snowFactor;
-                    g = g * (1-snowFactor) + cSnow.g * snowFactor;
-                    b = b * (1-snowFactor) + cSnow.b * snowFactor;
+                // Snow on high peaks
+                if (h > 400) {
+                    const snowNoise = texRng.random() * 40; 
+                    const snowFactor = Math.min(1, Math.max(0, (h - (420 - snowNoise)) * 0.05));
+                    const slopeRestriction = 1.0 - smoothstep(2.0, 4.0, slope);
+                    const finalSnow = snowFactor * slopeRestriction;
+
+                    r = r * (1 - finalSnow) + cSnow.r * finalSnow;
+                    g = g * (1 - finalSnow) + cSnow.g * finalSnow;
+                    b = b * (1 - finalSnow) + cSnow.b * finalSnow;
+                    roughness = roughness * (1 - finalSnow) + 0.8 * finalSnow;
                 }
                 
-                if(h < CONFIG.waterLevel + 8) {
-                    r *= 0.6; g *= 0.6; b *= 0.6;
+                // High Altitude Corries (Muddy Shore beneath Tarns)
+                if (isTarnShore) {
+                    r = r * 0.5 + cWater.r * 0.5;
+                    g = g * 0.5 + cWater.g * 0.5;
+                    b = b * 0.5 + cWater.b * 0.5;
+                    roughness = 0.2; // Wet muddy bottom under the water mesh
                 }
 
+                // Wet muddy shorelines near sea level
+                if (h < CONFIG.waterLevel + 8) {
+                    const wetMix = Math.max(0, 1.0 - (Math.max(0, h - (CONFIG.waterLevel - 5))) / 13.0);
+                    r *= (1 - wetMix * 0.5);
+                    g *= (1 - wetMix * 0.5);
+                    b *= (1 - wetMix * 0.4); 
+                    roughness = roughness * (1 - wetMix) + 0.1 * wetMix; // Extremely wet at shore
+                }
+
+                // --- APPLY RAYMARCHED SHADOWS (Terrain + Trees) ---
+                const smX = Math.floor((ix / res) * sRes);
+                const smY = Math.floor((iy / res) * sRes);
+                const shadowVal = shadowMap[smY * sRes + smX];
+                r *= shadowVal;
+                g *= shadowVal;
+                b *= shadowVal;
+                if (shadowVal < 1.0) roughness = 1.0; // Matte in shadows
+
+                // Set Diffuse Pixels
                 const idx = i * 4;
                 data[idx] = r;
                 data[idx+1] = g;
                 data[idx+2] = b;
                 data[idx+3] = 255;
+
+                // Set Roughness Pixels (Grayscale)
+                const rVal = Math.min(255, Math.max(0, roughness * 255));
+                rData[idx] = rVal;
+                rData[idx+1] = rVal;
+                rData[idx+2] = rVal;
+                rData[idx+3] = 255;
             }
             ctx.putImageData(imgData, 0, 0);
-
-            const shadowC = document.createElement('canvas');
-            shadowC.width = 128; shadowC.height = 256;
-            const sCtx = shadowC.getContext('2d');
-            const grd = sCtx.createLinearGradient(0, 0, 0, 256);
-            grd.addColorStop(0, "rgba(0,12,15,0.75)"); 
-            grd.addColorStop(1, "rgba(0,12,15,0.0)");
-            sCtx.fillStyle = grd;
-            sCtx.beginPath();
-            sCtx.moveTo(0, 0); sCtx.lineTo(128, 0); sCtx.lineTo(64, 256);
-            sCtx.fill();
-            
-            ctx.globalCompositeOperation = 'multiply';
-            const sx = -sunLight.position.x;
-            const sz = -sunLight.position.z;
-            const shadowAngle = Math.atan2(sz, sx) - Math.PI/2;
-            
-            treePositions.forEach(t => {
-                const u = (t.x / CONFIG.width + 0.5) * res;
-                const v = (t.z / CONFIG.width + 0.5) * res; 
-                const shadowLen = 120 * t.scale * (res/CONFIG.width);
-                const shadowWidth = 24 * t.scale * (res/CONFIG.width);
-                ctx.save();
-                ctx.translate(u, v);
-                ctx.rotate(shadowAngle);
-                ctx.drawImage(shadowC, -shadowWidth/2, 0, shadowWidth, shadowLen);
-                ctx.restore();
-            });
+            rCtx.putImageData(rImgData, 0, 0);
 
             const tex = new THREE.CanvasTexture(canvas);
             tex.colorSpace = THREE.SRGBColorSpace;
-            return tex;
+
+            const rTex = new THREE.CanvasTexture(rCanvas);
+            
+            return { diffuse: tex, roughness: rTex };
         }
 
         function createPineTreeMesh() {
-            const trunkGeo = new THREE.CylinderGeometry(1.5, 4, 30, 3, 1);
+            // Darker, Scots Pine style
+            const trunkGeo = new THREE.CylinderGeometry(1.5, 4, 30, 4, 1);
             trunkGeo.translate(0, 15, 0);
             const posAttr = trunkGeo.attributes.position;
             const colors = [];
+            // Reddish trunk for Scots Pine
             for(let i=0; i < posAttr.count; i++) {
-                const y = posAttr.getY(i);
-                const stiffness = Math.max(0, (y - 5) / 25); 
-                colors.push(stiffness, stiffness, stiffness);
+                colors.push(0.6, 0.3, 0.2); 
             }
             trunkGeo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
 
             const branches = [];
-            const layers = 5; 
+            const layers = 4; // Fewer, fluffier layers for Scots Pine
             for(let i=0; i<layers; i++) {
                 const t = i / (layers - 1);
-                const y = 8 + t * 20;
-                const r = 10 * (1.0 - t) + 1.5;
-                const cone = new THREE.ConeGeometry(r, 8, 4, 1);
+                const y = 15 + t * 15; // Foliage starts higher
+                const r = 14 * (1.0 - t * 0.7) + 3.0; // Wider canopy
+                const cone = new THREE.ConeGeometry(r, 8, 5, 1); // Shorter, flatter cones
                 cone.translate(0, y, 0);
                 const cPos = cone.attributes.position;
                 const cColors = [];
                 for(let k=0; k<cPos.count; k++) {
-                    cPos.setX(k, cPos.getX(k) + (Math.random()-0.5)*1.5);
-                    cPos.setZ(k, cPos.getZ(k) + (Math.random()-0.5)*1.5);
-                    cPos.setY(k, cPos.getY(k) + (Math.random()-0.5)*1.0);
-                    cColors.push(1.0, 1.0, 1.0); 
+                    cPos.setX(k, cPos.getX(k) + (Math.random()-0.5)*2.5);
+                    cPos.setZ(k, cPos.getZ(k) + (Math.random()-0.5)*2.5);
+                    cPos.setY(k, cPos.getY(k) + (Math.random()-0.5)*2.0);
+                    // Blue-green needles
+                    cColors.push(0.2, 0.35, 0.25); 
                 }
                 cone.setAttribute('color', new THREE.Float32BufferAttribute(cColors, 3));
                 branches.push(cone);
@@ -1759,7 +1982,7 @@
         }
 
         function initGameWorld(playerList, roomCode) {
-            console.group("🚀 INITIALIZING NORDIC OPERATIONS");
+            console.group("Initializing Game");
             
             if (roomCode) {
                 mapSeed = hashCode(roomCode);
@@ -1783,29 +2006,29 @@
 
             scene = new THREE.Scene();
             scene.background = new THREE.Color(0x050505);
-            scene.fog = new THREE.FogExp2(0xbccee0, CONFIG.fogDensity);
+            scene.fog = new THREE.FogExp2(0x99aabb, 0.00020); 
 
             for(let i=0; i<MAX_PROJECTILES; i++) projectilePool.push(new Projectile());
 
-            sunLight = new THREE.DirectionalLight(0xfff5e6, 4.5);
+            sunLight = new THREE.DirectionalLight(0xffeedd, 3.5);
             sunLight.position.set(800, 300, -800);
             sunLight.castShadow = true;
-            sunLight.shadow.mapSize.width = CONFIG.shadowRes;
-            sunLight.shadow.mapSize.height = CONFIG.shadowRes;
+            sunLight.shadow.mapSize.width = 2048; // Increased resolution
+            sunLight.shadow.mapSize.height = 2048;
             sunLight.shadow.camera.near = 100;
-            sunLight.shadow.camera.far = 4000;
-            const d = 2000;
+            sunLight.shadow.camera.far = 10000; // Increased range
+            const d = 6000; // Covers entire 12000m map
             sunLight.shadow.camera.left = -d; sunLight.shadow.camera.right = d;
             sunLight.shadow.camera.top = d; sunLight.shadow.camera.bottom = -d;
-            sunLight.shadow.bias = -0.0001; 
+            sunLight.shadow.bias = -0.0005; 
             scene.add(sunLight);
-            scene.add(new THREE.HemisphereLight(0x445566, 0x111111, 0.4));
+            scene.add(new THREE.HemisphereLight(0x556677, 0x112211, 0.6));
 
             sky = new Sky();
             sky.scale.setScalar(450000);
             scene.add(sky);
             const skyUniforms = sky.material.uniforms;
-            skyUniforms['turbidity'].value = 10;
+            skyUniforms['turbidity'].value = 15;
             skyUniforms['rayleigh'].value = 3;
             skyUniforms['mieCoefficient'].value = 0.005;
             skyUniforms['mieDirectionalG'].value = 0.99;
@@ -1822,6 +2045,7 @@
             let rng = mapSeed; 
             const myRandom = () => { rng = (rng * 9301 + 49297) % 233280; return rng / 233280; };
             
+            // Scottish Caledonian Pine Placement Strategy
             for(let i=0; i<potentialCount; i++) {
                 if (treePositions.length >= CONFIG.treeCount) break;
                 const x = (myRandom() - 0.5) * CONFIG.width;
@@ -1830,27 +2054,33 @@
                 
                 const y1 = getTerrainHeight(x+5, z);
                 const y2 = getTerrainHeight(x, z+5);
-                const slope = Math.abs(y - y1) + Math.abs(y - y2);
+                const slope = Math.sqrt(Math.pow(y - y1, 2) + Math.pow(y - y2, 2));
                 
-                if (y > CONFIG.waterLevel + 2 && y < 210 && slope < 3.5) {
-                    const scale = 1.0 + myRandom() * 1.5;
-                    treePositions.push({ x, y: y-1, z, scale, rot: myRandom()*Math.PI*2 });
+                if (y > CONFIG.waterLevel + 3 && y < 180 && slope < 1.8) {
+                    
+                    const clumpNoise = simplex.noise(x * 0.002, z * 0.002);
+                    const valleyBias = 1.0 - (y - CONFIG.waterLevel) / (180 - CONFIG.waterLevel);
+                    
+                    if (clumpNoise + valleyBias * 0.6 > 0.65) {
+                        const scale = 1.0 + myRandom() * 1.5;
+                        treePositions.push({ x, y: y-1, z, scale, rot: myRandom()*Math.PI*2 });
 
-                    const gx = Math.floor(x / TREE_GRID_SIZE);
-                    const gz = Math.floor(z / TREE_GRID_SIZE);
-                    const key = gx + "," + gz;
-                    if (!treeGrid.has(key)) treeGrid.set(key, []);
-                    treeGrid.get(key).push({
-                        x: x,
-                        y: y - 1,
-                        z: z,
-                        r: 3.5 * scale, 
-                        h: 32 * scale   
-                    });
+                        const gx = Math.floor(x / TREE_GRID_SIZE);
+                        const gz = Math.floor(z / TREE_GRID_SIZE);
+                        const key = gx + "," + gz;
+                        if (!treeGrid.has(key)) treeGrid.set(key, []);
+                        treeGrid.get(key).push({
+                            x: x,
+                            y: y - 1,
+                            z: z,
+                            r: 3.5 * scale, 
+                            h: 32 * scale   
+                        });
+                    }
                 }
             }
 
-            const bakedTexture = generateBakedTerrainTexture(treePositions, mapSeed);
+            const bakedTextures = generateBakedTerrainTexture(treePositions, mapSeed);
             const geometry = new THREE.PlaneGeometry(CONFIG.width, CONFIG.width, CONFIG.segments, CONFIG.segments);
             geometry.rotateX(-Math.PI / 2);
             const pos = geometry.attributes.position;
@@ -1860,30 +2090,142 @@
             geometry.computeVertexNormals();
             
             const terrainMaterial = new THREE.MeshStandardMaterial({
-                map: bakedTexture,
-                normalMap: matGrass.norm,
-                roughness: 1.0,
-                metalness: 0.0,
+                map: bakedTextures.diffuse,
+                roughnessMap: bakedTextures.roughness,
+                normalMap: matGrass.norm, // Base normal map
+                metalness: 0.1, 
+                envMapIntensity: 1.0
             });
-            terrainMaterial.normalScale.set(1, 1); 
+
+            // Shader injection for triplanar rock/grass blending
+            terrainMaterial.onBeforeCompile = (shader) => {
+                shader.uniforms.tRockNormal = { value: matRock.norm };
+                shader.uniforms.tRockDiff = { value: matRock.diff };
+                shader.uniforms.tGrassDiff = { value: matGrass.diff };
+                
+                shader.vertexShader = `
+                    varying vec3 vWorldPos;
+                    varying vec3 vWorldNormal;
+                    ${shader.vertexShader}
+                `.replace(
+                    '#include <begin_vertex>',
+                    `
+                    #include <begin_vertex>
+                    vWorldPos = (modelMatrix * vec4(position, 1.0)).xyz;
+                    vWorldNormal = normalize(mat3(modelMatrix) * normal);
+                    `
+                );
+
+                shader.fragmentShader = `
+                    uniform sampler2D tRockNormal;
+                    uniform sampler2D tRockDiff;
+                    uniform sampler2D tGrassDiff;
+                    varying vec3 vWorldPos;
+                    varying vec3 vWorldNormal;
+
+                    vec4 getTriplanarDiffuse(sampler2D tex, vec3 pos, vec3 blend, float scale) {
+                        vec4 tx = texture2D(tex, pos.zy * scale);
+                        vec4 ty = texture2D(tex, pos.xz * scale);
+                        vec4 tz = texture2D(tex, pos.xy * scale);
+                        return tx * blend.x + ty * blend.y + tz * blend.z;
+                    }
+
+                    vec3 getTriplanarNormal(sampler2D tex, vec3 pos, vec3 wNormal, vec3 blend, float scale, vec2 nScale) {
+                        vec3 tx = texture2D(tex, pos.zy * scale).xyz * 2.0 - 1.0;
+                        vec3 ty = texture2D(tex, pos.xz * scale).xyz * 2.0 - 1.0;
+                        vec3 tz = texture2D(tex, pos.xy * scale).xyz * 2.0 - 1.0;
+
+                        tx.xy *= nScale;
+                        ty.xy *= nScale;
+                        tz.xy *= nScale;
+
+                        vec3 nx = vec3(0.0, tx.y, tx.x);
+                        vec3 ny = vec3(ty.x, 0.0, ty.y);
+                        vec3 nz = vec3(tz.x, tz.y, 0.0);
+
+                        return wNormal + nx * blend.x + ny * blend.y + nz * blend.z;
+                    }
+
+                    ${shader.fragmentShader}
+                `.replace(
+                    '#include <map_fragment>',
+                    `
+                    #ifdef USE_MAP
+                        vec4 sampledDiffuseColor = texture2D( map, vMapUv );
+                        
+                        vec3 nWorldNormal = normalize(vWorldNormal);
+                        vec3 blendWeights = abs(nWorldNormal);
+                        blendWeights = max(blendWeights - 0.2, 0.0);
+                        blendWeights /= (blendWeights.x + blendWeights.y + blendWeights.z);
+
+                        float triScale = 1.0 / 150.0;
+                        vec4 rockDiff = getTriplanarDiffuse(tRockDiff, vWorldPos, blendWeights, triScale);
+                        vec4 grassDiff = getTriplanarDiffuse(tGrassDiff, vWorldPos, blendWeights, triScale);
+
+                        float slope = 1.0 - nWorldNormal.y;
+                        float rockMix = smoothstep(0.12, 0.45, slope);
+
+                        vec4 detailColor = mix(grassDiff, rockDiff, rockMix);
+                        float lum = dot(detailColor.rgb, vec3(0.299, 0.587, 0.114));
+
+                        float detailOverlay = (lum - 0.25) * 2.5 + 1.0;
+                        sampledDiffuseColor.rgb *= detailOverlay;
+
+                        diffuseColor *= sampledDiffuseColor;
+                    #endif
+                    `
+                ).replace(
+                    '#include <normal_fragment_maps>',
+                    `
+                    #ifdef USE_NORMALMAP
+                        vec3 nWorldNormalN = normalize(vWorldNormal);
+                        vec3 blendWeightsN = abs(nWorldNormalN);
+                        blendWeightsN = max(blendWeightsN - 0.2, 0.0);
+                        blendWeightsN /= (blendWeightsN.x + blendWeightsN.y + blendWeightsN.z);
+
+                        float triScaleN = 1.0 / 150.0;
+                        
+                        vec3 triGrassN = getTriplanarNormal(normalMap, vWorldPos, nWorldNormalN, blendWeightsN, triScaleN, normalScale);
+                        vec3 triRockN = getTriplanarNormal(tRockNormal, vWorldPos, nWorldNormalN, blendWeightsN, triScaleN, normalScale);
+                        
+                        float slopeN = 1.0 - nWorldNormalN.y;
+                        float rockMixN = smoothstep(0.12, 0.45, slopeN);
+
+                        vec3 worldNormalPerturbed = normalize(mix(triGrassN, triRockN, rockMixN));
+                        
+                        normal = normalize((viewMatrix * vec4(worldNormalPerturbed, 0.0)).xyz);
+                    #endif
+                    `
+                );
+            };
+
+            terrainMaterial.normalScale.set(1.5, 1.5); 
             matGrass.norm.repeat.set(80, 80); 
+            matRock.norm.repeat.set(80, 80); // Tiling for rock
+
             const terrain = new THREE.Mesh(geometry, terrainMaterial);
             terrain.receiveShadow = true;
             terrain.castShadow = true;
             scene.add(terrain);
 
+            waterMeshes = [];
+
             const waterGeo = new THREE.PlaneGeometry(CONFIG.width, CONFIG.width);
-            water = new Water(waterGeo, {
+            const mainWater = new Water(waterGeo, {
                 textureWidth: 256, textureHeight: 256,
                 waterNormals: matWater.norm,
                 sunDirection: sunLight.position.clone().normalize(),
-                sunColor: 0xffffff, waterColor: 0x061821,
+                sunColor: 0xffeebb, 
+                waterColor: 0x020508, // Inky dark brown/black peat water
                 distortionScale: 3.7, fog: true
             });
-            water.rotation.x = -Math.PI / 2;
-            water.position.y = CONFIG.waterLevel;
-            water.material.uniforms.size.value = 8.0; 
-            scene.add(water);
+            mainWater.rotation.x = -Math.PI / 2;
+            mainWater.position.y = CONFIG.waterLevel;
+            mainWater.material.uniforms.size.value = 8.0; 
+            scene.add(mainWater);
+            waterMeshes.push(mainWater);
+
+            // [REMOVED] Spawn True High-Altitude Lochans (Tarns) - Removed to eliminate random holes/craters
 
             const treeGeo = createPineTreeMesh();
             const treeMat = new THREE.MeshStandardMaterial({ color: 0x1a2615, roughness: 0.8, vertexColors: true, side: THREE.FrontSide });
@@ -2098,7 +2440,11 @@
             const delta = clock.getDelta();
             const timeScale = Math.min(delta, 0.1) * 60;
 
-            if (water) water.material.uniforms['time'].value += 1.0 / 60.0;
+            waterMeshes.forEach(w => {
+                if (w.material.uniforms['time']) {
+                    w.material.uniforms['time'].value += 1.0 / 60.0;
+                }
+            });
             
             const me = players.find(p => p.index === myPlayerIndex);
 
