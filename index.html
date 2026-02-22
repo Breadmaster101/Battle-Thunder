@@ -407,7 +407,7 @@
     </div>
 
     <div id="crash-msg" class="crash-msg">
-        <div id="death-reason" style="font-size:32px; color:red; margin-bottom:10px;">CRITICAL FAILURE</div>
+        <div id="death-reason" style="font-size:32px; color:red; margin-bottom:10px;">YOU CRASHED</div>
         <span style="font-size:20px; color:white;" id="respawn-text">RESPAWNING...</span>
     </div>
 
@@ -460,6 +460,7 @@
 
         // Global Erosion & Terrain Data
         let erodedHeightmap = null;
+        let mountainLochs = [];
         const EROSION_GRID_SIZE = 512;
         const EROSION_DROPLETS = 150000;
 
@@ -495,7 +496,8 @@
         const sharedExplosionGeo = new THREE.BoxGeometry(0.4, 0.4, 0.4);
         let explosions = [];
         let csm;
-        let treeShaderUniforms = []; // Array to store tree uniforms for passing LOD camera positions
+
+        let treeChunkData = []; // Array to store chunks for CPU-side LOD
 
         let treeGrid = new Map();
         const TREE_GRID_SIZE = 400;
@@ -536,14 +538,26 @@
         }
 
         // --- TERRAIN GENERATION LOGIC: SCOTTISH HIGHLANDS ---
-        function getTerrainHeight(x, z) {
+        function getBaseTerrainHeight(x, z) {
             // Normalized coordinates (-0.5 to 0.5)
             const nx = x / CONFIG.width;
             const nz = z / CONFIG.width;
 
             // 1. The Great Glen Fault Line
             const faultLine = Math.abs(nx + nz);
-            const glenTrench = smoothstep(0.0, 0.08, faultLine);
+            
+            // Along Fault determines transition from mountain origin to open ocean.
+            // ranges from -1 to 1. 
+            // -1 side tapers into mountains. +1 side drops into ocean.
+            const alongFault = (nx - nz); 
+
+            // Calculate taper factor for the mountain origin side
+            let taperNoise = simplex.noise(nx * 4.0 + 20, nz * 4.0 + 20) * 0.1;
+            let taperDist = alongFault + taperNoise;
+            const taperFactor = smoothstep(-0.2, -0.6, taperDist); // 1.0 when fully tapered into mountains
+
+            const trenchWidth = 0.08 * (1.0 - taperFactor * 0.9);
+            const glenTrench = smoothstep(0.0, trenchWidth, faultLine);
 
             // 2. Base Highlands (Rolling Moors)
             let moors = simplex.noise(nx * 1.5 + mapSeed, nz * 1.5 + mapSeed) * 70;
@@ -551,6 +565,8 @@
 
             // 3. Munros (Mountains) - Ridged Multifractal Noise
             let mountainMask = smoothstep(0.02, 0.25, faultLine);
+            mountainMask += taperFactor * 0.5; // Boost mountains on the tapered side
+            mountainMask = Math.min(1.0, mountainMask);
 
             let freq = 2.0;
             let amp = 600.0;
@@ -559,11 +575,9 @@
             for (let i = 0; i < 6; i++) {
                 let n = 1.0 - Math.abs(simplex.noise(nx * freq + 100, nz * freq + 100));
                 
-                // Smooth the ridge peak using a hermite curve to avoid sawtooth spikes.
-                // This ensures the derivative is 0 at the very top of the ridge (n=1).
                 n = n * n * (3.0 - 2.0 * n); 
                 
-                n *= weight; // Higher ridges lift subsequent detail layers
+                n *= weight; 
                 weight = Math.max(0.0, Math.min(1.0, n * 2.5));
                 peaks += n * amp;
                 amp *= 0.45;
@@ -574,33 +588,131 @@
 
             // 4. Glacial Erosion (U-Shaped Valleys)
             let valleyNoise = simplex.noise(nx * 3.0 + 50, nz * 3.0 + 50);
-            // Use a smooth parabolic function (n^2) to create U-shaped valleys at zero crossings.
-            // This avoids the infinite derivative of power 0.2 which caused the sawtooth spikes.
             let valleyScale = valleyNoise * valleyNoise; 
             height *= (0.4 + 0.6 * valleyScale);
 
-            // 6. High-frequency Crags on Peaks (Rocky outcrops)
+            // 5. High-frequency Crags on Peaks (Rocky outcrops)
             let crags = simplex.noise(nx * 20.0, nz * 20.0) * 20;
             height += crags * Math.max(0, (height / 200.0));
 
-            // 7. Carve the Great Glen Loch
-            height = THREE.MathUtils.lerp(CONFIG.waterLevel - 100, height, glenTrench);
-
-            // 8. Base terrain height offset
+            // 6. Base terrain height offset
             height += 30;
 
-            // 9. Edge constraint & Coastal Fjords (Sea Lochs)
-            const distFromCenter = Math.sqrt(nx * nx + nz * nz);
-            const edgeDist = 0.45;
-            if (distFromCenter > edgeDist) {
-                const falloff = smoothstep(edgeDist, 0.495, distFromCenter);
-                // Where the fault line hits the edge, drop dramatically into a sea fjord
-                const fjordMouth = 1.0 - smoothstep(0.0, 0.12, faultLine);
-                const dropTarget = -100 - (fjordMouth * 250);
-                height = THREE.MathUtils.lerp(height, dropTarget, falloff);
-            }
+            // 7. Carve the Great Glen Loch
+            const targetLochHeight = CONFIG.waterLevel - 100;
+            const carveAmount = (1.0 - glenTrench) * (1.0 - taperFactor); // No carving if fully tapered
+            height = THREE.MathUtils.lerp(height, targetLochHeight, carveAmount);
+
+            // 8. Open Ocean Transition on the opposite side
+            let coastNoise = simplex.noise(nx * 5.0, nz * 5.0) * 0.15;
+            let oceanDist = alongFault + coastNoise;
+            const oceanDrop = smoothstep(0.3, 0.7, oceanDist);
+            const oceanTarget = CONFIG.waterLevel - 150;
+            height = THREE.MathUtils.lerp(height, oceanTarget, oceanDrop);
 
             return height;
+        }
+
+        function findAndCreateMountainLochs() {
+            mountainLochs = [];
+            const gridSize = 128;
+            const step = CONFIG.width / gridSize;
+            const heights = new Float32Array(gridSize * gridSize);
+            
+            // Generate coarse heightmap
+            for (let y = 0; y < gridSize; y++) {
+                for (let x = 0; x < gridSize; x++) {
+                    let wx = (x / (gridSize - 1) - 0.5) * CONFIG.width;
+                    let wz = (y / (gridSize - 1) - 0.5) * CONFIG.width;
+                    heights[y * gridSize + x] = getBaseTerrainHeight(wx, wz);
+                }
+            }
+
+            const minLochDistSq = 1600 * 1600;
+            let lRng = createSeededRNG(mapSeed + 555);
+            const SEARCH_RADIUS = 5;
+
+            for (let y = SEARCH_RADIUS; y < gridSize - SEARCH_RADIUS; y++) {
+                for (let x = SEARCH_RADIUS; x < gridSize - SEARCH_RADIUS; x++) {
+                    let idx = y * gridSize + x;
+                    let h = heights[idx];
+                    
+                    // Only find minima at high altitude (avoiding main ocean and loch)
+                    if (h > CONFIG.waterLevel + 60 && h < 450) {
+                        let isMin = true;
+                        // Larger neighborhood search
+                        for(let dy = -SEARCH_RADIUS; dy <= SEARCH_RADIUS; dy++) {
+                            for(let dx = -SEARCH_RADIUS; dx <= SEARCH_RADIUS; dx++) {
+                                if (dx===0 && dy===0) continue;
+                                if (heights[(y+dy)*gridSize + (x+dx)] < h) {
+                                    isMin = false;
+                                    break;
+                                }
+                            }
+                            if(!isMin) break;
+                        }
+                        
+                        if (isMin) {
+                            let wx = (x / (gridSize - 1) - 0.5) * CONFIG.width;
+                            let wz = (y / (gridSize - 1) - 0.5) * CONFIG.width;
+                            
+                            let tooClose = false;
+                            for (let l of mountainLochs) {
+                                let dx = l.x - wx;
+                                let dz = l.z - wz;
+                                if (dx*dx + dz*dz < minLochDistSq) {
+                                    tooClose = true;
+                                    break;
+                                }
+                            }
+                            
+                            if (!tooClose) {
+                                let r = 180 + lRng.random() * 120; 
+                                mountainLochs.push({ x: wx, z: wz, y: h + 8, r: r });
+                            }
+                        }
+                    }
+                }
+            }
+            console.log("Generated Mountain Lochs:", mountainLochs.length);
+        }
+
+        function getTerrainHeight(x, z) {
+            let h = getBaseTerrainHeight(x, z);
+            
+            // Carve out flat basins for the mountain lochs
+            for(let i=0; i < mountainLochs.length; i++) {
+                let l = mountainLochs[i];
+                let dx = x - l.x;
+                let dz = z - l.z;
+                
+                // Fast AABB check
+                if (Math.abs(dx) > l.r || Math.abs(dz) > l.r) continue;
+
+                let distSq = dx*dx + dz*dz;
+                let rSq = l.r * l.r;
+                
+                if (distSq < rSq) {
+                    let dist = Math.sqrt(distSq);
+                    let t = dist / l.r;
+                    
+                    let lakeBed = l.y - 15;
+                    
+                    let basinProfile;
+                    if (t < 0.6) {
+                        basinProfile = lakeBed;
+                    } else {
+                        let st = (t - 0.6) / 0.4; // 0 to 1
+                        basinProfile = THREE.MathUtils.lerp(lakeBed, l.y + 8, st);
+                    }
+                    
+                    let blend = smoothstep(0.7, 1.0, t);
+                    let safeH = Math.max(h, l.y + 2);
+                    h = THREE.MathUtils.lerp(basinProfile, safeH, blend);
+                }
+            }
+            
+            return h;
         }
 
         function generateAndErodeHeightmap() {
@@ -780,9 +892,6 @@
                 const wx = (ix / res - 0.5) * CONFIG.width;
                 const wz = (iy / res - 0.5) * CONFIG.width;
 
-                const nx = wx / CONFIG.width;
-                const nz = wz / CONFIG.width;
-
                 const h = getTerrainHeight(wx, wz);
                 const h2 = getTerrainHeight(wx + 5, wz);
                 const h3 = getTerrainHeight(wx, wz + 5);
@@ -795,7 +904,19 @@
                 const heatherNoise = (simplex.noise(wx * 0.002, wz * 0.002) + 1) * 0.5;
                 const peatNoise = (simplex.noise(wx * 0.005 + 100, wz * 0.005 + 100) + 1) * 0.5;
 
+                // Detect Mountain Loch Shore
                 let isTarnShore = false;
+                for(let l of mountainLochs) {
+                    let dx = wx - l.x;
+                    let dz = wz - l.z;
+                    if (Math.abs(dx) > l.r || Math.abs(dz) > l.r) continue;
+                    if (dx*dx + dz*dz < l.r * l.r) {
+                        if (h <= l.y + 1) {
+                            isTarnShore = true;
+                            break;
+                        }
+                    }
+                }
 
                 r = cGrass.r; g = cGrass.g; b = cGrass.b;
 
@@ -1643,7 +1764,7 @@
                     if (this.lastAttackerName) {
                         el.innerText = `SHOT DOWN BY ${this.lastAttackerName}`;
                     } else {
-                        el.innerText = "CRITICAL FAILURE";
+                        el.innerText = "YOU CRASHED";
                     }
                     document.getElementById('crash-msg').style.display = 'block';
                 }
@@ -1785,6 +1906,20 @@
                     hitEnvironment = true;
                 }
 
+                // Check Mountain Loch water surface collisions
+                if (!hitEnvironment) {
+                    for(let l of mountainLochs) {
+                        let dx = this.mesh.position.x - l.x;
+                        let dz = this.mesh.position.z - l.z;
+                        if (dx*dx + dz*dz < l.r * l.r * 0.8) {
+                            if (this.mesh.position.y < l.y) {
+                                hitEnvironment = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+
                 if (!hitEnvironment) {
                     const gx = Math.floor(this.mesh.position.x / TREE_GRID_SIZE);
                     const gz = Math.floor(this.mesh.position.z / TREE_GRID_SIZE);
@@ -1836,18 +1971,36 @@
                 this.hp = data.hp;
 
                 if (data.pos && data.quat) {
-                    this.positionBuffer.push({
-                        timestamp: Date.now(),
-                        pos: new THREE.Vector3(data.pos.x, data.pos.y, data.pos.z),
-                        quat: new THREE.Quaternion(data.quat._x || data.quat.x, data.quat._y || data.quat.y, data.quat._z || data.quat.z, data.quat._w || data.quat.w),
-                        spd: data.spd,
-                        throt: data.throt,
-                        shoot: data.shoot
-                    });
-                }
-
-                if (this.positionBuffer.length > 20) {
-                    this.positionBuffer.shift();
+                    let bufferItem;
+                    if (this.positionBuffer.length >= 20) {
+                        bufferItem = this.positionBuffer.shift();
+                        bufferItem.timestamp = Date.now();
+                        bufferItem.pos.set(data.pos.x, data.pos.y, data.pos.z);
+                        bufferItem.quat.set(
+                            data.quat._x || data.quat.x,
+                            data.quat._y || data.quat.y,
+                            data.quat._z || data.quat.z,
+                            data.quat._w || data.quat.w
+                        );
+                        bufferItem.spd = data.spd;
+                        bufferItem.throt = data.throt;
+                        bufferItem.shoot = data.shoot;
+                    } else {
+                        bufferItem = {
+                            timestamp: Date.now(),
+                            pos: new THREE.Vector3(data.pos.x, data.pos.y, data.pos.z),
+                            quat: new THREE.Quaternion(
+                                data.quat._x || data.quat.x,
+                                data.quat._y || data.quat.y,
+                                data.quat._z || data.quat.z,
+                                data.quat._w || data.quat.w
+                            ),
+                            spd: data.spd,
+                            throt: data.throt,
+                            shoot: data.shoot
+                        };
+                    }
+                    this.positionBuffer.push(bufferItem);
                 }
             }
 
@@ -1939,7 +2092,12 @@
                 simplex = new SimplexNoise(createSeededRNG(mapSeed));
             }
 
-            treeShaderUniforms = []; // Reset uniforms list if re-initializing
+            treeChunkData = []; // Reset chunks list if re-initializing
+            
+            // Generate Mountain Lochs metadata FIRST, so getTerrainHeight can carve them out
+            findAndCreateMountainLochs();
+
+            // Bake Heightmap
             generateAndErodeHeightmap();
 
             const hmTexture = new THREE.DataTexture(erodedHeightmap, EROSION_GRID_SIZE, EROSION_GRID_SIZE, THREE.RedFormat, THREE.FloatType);
@@ -1998,71 +2156,66 @@
             mainWater.rotation.x = -Math.PI / 2;
             mainWater.position.y = CONFIG.waterLevel;
             mainWater.material.uniforms.size.value = 8.0;
-
             mainWater.material.transparent = true;
-            const origWaterOBC = mainWater.material.onBeforeCompile.bind(mainWater.material);
-            mainWater.material.onBeforeCompile = (shader, renderer) => {
-                origWaterOBC(shader, renderer);
-
-                shader.uniforms.tTerrainHeight = { value: hmTexture };
-                shader.uniforms.uTerrainSize = { value: CONFIG.width };
-                shader.uniforms.uWaterLevel = { value: CONFIG.waterLevel };
-
-                shader.vertexShader = `
-                    varying vec3 vWorldPosW;
-                    ${shader.vertexShader}
-                `.replace(
-                    '#include <begin_vertex>',
-                    `
-                    #include <begin_vertex>
-                    vWorldPosW = (modelMatrix * vec4(position, 1.0)).xyz;
-                    `
-                );
-
-                shader.fragmentShader = `
-                    uniform sampler2D tTerrainHeight;
-                    uniform float uTerrainSize;
-                    uniform float uWaterLevel;
-                    varying vec3 vWorldPosW;
-                    ${shader.fragmentShader}
-                `.replace(
-                    'gl_FragColor = vec4( color, 1.0 );',
-                    `
-                    vec2 hmUvW = vWorldPosW.xz / uTerrainSize + 0.5;
-                    float tHeightW = texture2D(tTerrainHeight, hmUvW).r;
-                    float depthW = uWaterLevel - tHeightW;
-                    
-                    // Scottish Loch shallow water color (peaty, dark greenish-brown)
-                    vec3 shallowColor = vec3(0.08, 0.12, 0.06); 
-                    float shoreBlendW = smoothstep(-0.5, 6.0, depthW);
-                    
-                    // Animated lapping foam waves
-                    float waveOffset = time * 2.0;
-                    float wave1 = sin(depthW * 3.0 - waveOffset) * 0.5 + 0.5;
-                    float wave2 = sin(depthW * 7.0 - waveOffset * 1.5 + vWorldPosW.x * 0.1) * 0.5 + 0.5;
-                    
-                    float foamBase = smoothstep(0.0, 1.5, depthW) - smoothstep(0.5, 5.0, depthW);
-                    float foamNoiseW = texture2D( normalSampler, vWorldPosW.xz * 0.08 + time * 0.01 ).x;
-                    
-                    // Combine waves and noise to create lapping froth
-                    float foamW = foamBase * (wave1 * 0.6 + wave2 * 0.4) * (foamNoiseW * 1.5 + 0.2);
-                    // Add a thin crisp edge right at depth 0
-                    float edgeFoam = (1.0 - smoothstep(0.0, 0.4, depthW)) * smoothstep(-0.1, 0.1, depthW);
-                    foamW += edgeFoam * foamNoiseW;
-
-                    vec3 finalColorW = mix(shallowColor, color, shoreBlendW);
-                    finalColorW += vec3(0.85, 0.9, 0.95) * foamW * 1.8;
-                    
-                    // Soft alpha blend with terrain to avoid jagged clipping
-                    float alphaW = smoothstep(-0.5, 1.5, depthW);
-
-                    gl_FragColor = vec4( finalColorW, clamp(alphaW + foamW, 0.0, 1.0) * 0.98 );
-                    `
-                );
-            };
 
             scene.add(mainWater);
             waterMeshes.push(mainWater);
+
+            // Generate Mountain Loch Water Meshes
+            mountainLochs.forEach((loch) => {
+                const geo = new THREE.PlaneGeometry(loch.r * 2.5, loch.r * 2.5, 16, 16);
+                const mWater = new Water(geo, {
+                    textureWidth: 256, textureHeight: 256,
+                    waterNormals: matWater.norm,
+                    sunDirection: sunDirToSun,
+                    sunColor: 0xffeebb,
+                    waterColor: 0x010305, 
+                    distortionScale: 2.0, 
+                    fog: true
+                });
+                mWater.rotation.x = -Math.PI / 2;
+                mWater.position.set(loch.x, loch.y, loch.z);
+                mWater.material.uniforms.size.value = 4.0;
+                
+                mWater.material.transparent = true;
+                const origOBC = mWater.material.onBeforeCompile.bind(mWater.material);
+                
+                // Add soft radial alpha-fade for mountain shores
+                mWater.material.onBeforeCompile = (shader, renderer) => {
+                    origOBC(shader, renderer);
+                    shader.uniforms.uRadius = { value: loch.r };
+                    shader.uniforms.uCenter = { value: new THREE.Vector2(loch.x, loch.z) };
+                    
+                    shader.vertexShader = `
+                        varying vec2 vWorldPosXZ;
+                        ${shader.vertexShader}
+                    `.replace(
+                        '#include <begin_vertex>',
+                        `
+                        #include <begin_vertex>
+                        vWorldPosXZ = (modelMatrix * vec4(position, 1.0)).xz;
+                        `
+                    );
+                    
+                    shader.fragmentShader = `
+                        uniform float uRadius;
+                        uniform vec2 uCenter;
+                        varying vec2 vWorldPosXZ;
+                        ${shader.fragmentShader}
+                    `.replace(
+                        'gl_FragColor = vec4( color, 1.0 );',
+                        `
+                        float dist = distance(vWorldPosXZ, uCenter);
+                        // Alpha fades entirely before the water plane can pierce the terrain rim
+                        float alpha = 1.0 - smoothstep(uRadius * 0.75, uRadius * 0.85, dist);
+                        gl_FragColor = vec4( color, alpha * 0.95 );
+                        `
+                    );
+                };
+                
+                scene.add(mWater);
+                waterMeshes.push(mWater);
+            });
 
             // Initialize Players First to Setup CSM Camera
             players = [];
@@ -2081,8 +2234,8 @@
 
             // --- Cascaded Shadow Maps (CSM) System ---
             csm = new CSM({
-                maxFar: 12000, // INCREASED: Covers the massive landscape out to the far plane
-                cascades: 4,   // 4 LOD levels of shadows
+                maxFar: 12000, 
+                cascades: 4,   
                 mode: 'practical',
                 parent: scene,
                 shadowMapSize: 2048,
@@ -2095,7 +2248,6 @@
                 lightMargin: 4000
             });
             csm.fade = true;
-            // Ensure shadow lights don't produce shadow acne
             for (let i = 0; i < csm.lights.length; i++) {
                 csm.lights[i].shadow.bias = -0.0003;
                 csm.lights[i].shadow.normalBias = 1.0;
@@ -2119,7 +2271,19 @@
                 const y2 = getTerrainHeight(x, z + 5);
                 const slope = Math.sqrt(Math.pow(y - y1, 2) + Math.pow(y - y2, 2));
 
-                if (y > CONFIG.waterLevel + 3 && y < 180 && slope < 1.8) {
+                let inTarn = false;
+                for(let l of mountainLochs) {
+                    let dx = x - l.x;
+                    let dz = z - l.z;
+                    if (dx*dx + dz*dz < l.r * l.r * 0.8) {
+                        if (y < l.y + 2) {
+                            inTarn = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (!inTarn && y > CONFIG.waterLevel + 3 && y < 180 && slope < 1.8) {
 
                     const clumpNoise = simplex.noise(x * 0.002, z * 0.002);
                     const valleyBias = 1.0 - (y - CONFIG.waterLevel) / (180 - CONFIG.waterLevel);
@@ -2160,7 +2324,6 @@
                 envMapIntensity: 1.0
             });
 
-            // Set up terrain for CSM (must be done before overriding onBeforeCompile)
             csm.setupMaterial(terrainMaterial);
 
             const origTerrainOBC = terrainMaterial.onBeforeCompile.bind(terrainMaterial);
@@ -2312,39 +2475,8 @@
 
             const treeGeo = createPineTreeMesh();
             const treeMat = new THREE.MeshStandardMaterial({ color: 0x1a2615, roughness: 0.8, vertexColors: true, side: THREE.FrontSide });
-
             csm.setupMaterial(treeMat);
-            const origTreeOBC = treeMat.onBeforeCompile.bind(treeMat);
-
-            // Using uMainCameraPos ensures shadow map pass doesn't accidentally cull trees nearest to the light
-            treeMat.onBeforeCompile = (shader, renderer) => {
-                origTreeOBC(shader, renderer);
-                shader.uniforms.uMainCameraPos = { value: new THREE.Vector3() };
-                treeShaderUniforms.push(shader.uniforms);
-                const lodScript = `
-                    vec4 _worldPos = modelMatrix * instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0);
-                    float _dist = distance(_worldPos.xyz, uMainCameraPos);
-                `;
-                shader.vertexShader = `
-                    uniform vec3 uMainCameraPos;
-                    ${shader.vertexShader}
-                `.replace('#include <begin_vertex>', `#include <begin_vertex>\n${lodScript}\nif(_dist > ${CONFIG.lodDistance}.0) transformed = vec3(0.0);`);
-            };
-
-            // High LOD Depth Material - Used for close up crisp shadows
             const treeHighDepthMat = new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking });
-            treeHighDepthMat.onBeforeCompile = (shader) => {
-                shader.uniforms.uMainCameraPos = { value: new THREE.Vector3() };
-                treeShaderUniforms.push(shader.uniforms);
-                const lodScript = `
-                    vec4 _worldPos = modelMatrix * instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0);
-                    float _dist = distance(_worldPos.xyz, uMainCameraPos);
-                `;
-                shader.vertexShader = `
-                    uniform vec3 uMainCameraPos;
-                    ${shader.vertexShader}
-                `.replace('#include <begin_vertex>', `#include <begin_vertex>\n${lodScript}\nif(_dist > ${CONFIG.lodDistance}.0) transformed = vec3(0.0);`);
-            };
 
             const geometryTri = new THREE.BufferGeometry();
             const w = 10; const h = 35;
@@ -2352,58 +2484,61 @@
             geometryTri.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
             geometryTri.computeVertexNormals();
             const treeMatLow = new THREE.MeshBasicMaterial({ color: 0x070c05, side: THREE.DoubleSide });
-
-            treeMatLow.onBeforeCompile = (shader) => {
-                shader.uniforms.uMainCameraPos = { value: new THREE.Vector3() };
-                treeShaderUniforms.push(shader.uniforms);
-                const lodScript = `
-                    vec4 _worldPos = modelMatrix * instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0);
-                    float _dist = distance(_worldPos.xyz, uMainCameraPos);
-                `;
-                shader.vertexShader = `
-                    uniform vec3 uMainCameraPos;
-                    ${shader.vertexShader}
-                `.replace('#include <begin_vertex>', `#include <begin_vertex>\n${lodScript}\nif(_dist <= ${CONFIG.lodDistance}.0) transformed = vec3(0.0);`);
-            };
-
-            // Low LOD Depth Material - This is what allows shadows to continue off into the extreme distance without killing performance
             const treeLowDepthMat = new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking });
-            treeLowDepthMat.onBeforeCompile = (shader) => {
-                shader.uniforms.uMainCameraPos = { value: new THREE.Vector3() };
-                treeShaderUniforms.push(shader.uniforms);
-                const lodScript = `
-                    vec4 _worldPos = modelMatrix * instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0);
-                    float _dist = distance(_worldPos.xyz, uMainCameraPos);
-                `;
-                shader.vertexShader = `
-                    uniform vec3 uMainCameraPos;
-                    ${shader.vertexShader}
-                `.replace('#include <begin_vertex>', `#include <begin_vertex>\n${lodScript}\nif(_dist <= ${CONFIG.lodDistance}.0) transformed = vec3(0.0);`);
-            };
 
-            const treesHigh = new THREE.InstancedMesh(treeGeo, treeMat, treePositions.length);
-            treesHigh.castShadow = true;
-            treesHigh.receiveShadow = true;
-            treesHigh.customDepthMaterial = treeHighDepthMat;
-            treesHigh.frustumCulled = false;
+            const CHUNK_SIZE = 2000;
+            const treeChunks = new Map();
 
-            const treesLow = new THREE.InstancedMesh(geometryTri, treeMatLow, treePositions.length);
-            treesLow.castShadow = true; // CHANGED: Enabled shadow casting for low LOD trees to render distant shadows
-            treesLow.receiveShadow = false;
-            treesLow.customDepthMaterial = treeLowDepthMat; // Hand-offs shadow generation to low-poly plane intersecting meshes at distance
-            treesLow.frustumCulled = false;
-
-            treePositions.forEach((t, i) => {
-                dummy.position.set(t.x, t.y, t.z);
-                dummy.scale.set(t.scale, t.scale * (0.8 + myRandom() * 0.4), t.scale);
-                dummy.rotation.y = t.rot;
-                dummy.updateMatrix();
-                treesHigh.setMatrixAt(i, dummy.matrix);
-                treesLow.setMatrixAt(i, dummy.matrix);
+            treePositions.forEach(t => {
+                const cX = Math.floor((t.x + CONFIG.width / 2) / CHUNK_SIZE);
+                const cZ = Math.floor((t.z + CONFIG.width / 2) / CHUNK_SIZE);
+                const key = cX + ',' + cZ;
+                if (!treeChunks.has(key)) treeChunks.set(key, []);
+                treeChunks.get(key).push(t);
             });
-            scene.add(treesHigh); scene.add(treesLow);
 
-            // Apply CSM to all player parts
+            const treeGroup = new THREE.Group();
+
+            treeChunks.forEach((chunkPositions, key) => {
+                const treesHighChunk = new THREE.InstancedMesh(treeGeo, treeMat, chunkPositions.length);
+                treesHighChunk.castShadow = true;
+                treesHighChunk.receiveShadow = true;
+                treesHighChunk.customDepthMaterial = treeHighDepthMat;
+                
+                const treesLowChunk = new THREE.InstancedMesh(geometryTri, treeMatLow, chunkPositions.length);
+                treesLowChunk.castShadow = true; 
+                treesLowChunk.receiveShadow = false;
+                treesLowChunk.customDepthMaterial = treeLowDepthMat; 
+
+                chunkPositions.forEach((t, i) => {
+                    dummy.position.set(t.x, t.y, t.z);
+                    dummy.scale.set(t.scale, t.scale * (0.8 + myRandom() * 0.4), t.scale);
+                    dummy.rotation.y = t.rot;
+                    dummy.updateMatrix();
+                    treesHighChunk.setMatrixAt(i, dummy.matrix);
+                    treesLowChunk.setMatrixAt(i, dummy.matrix);
+                });
+
+                treesHighChunk.computeBoundingSphere();
+                treesLowChunk.computeBoundingSphere();
+
+                treeGroup.add(treesHighChunk);
+                treeGroup.add(treesLowChunk);
+
+                // Calculate center coordinate for LOD distance checks
+                const [cX, cZ] = key.split(',').map(Number);
+                const centerX = cX * CHUNK_SIZE - CONFIG.width / 2 + CHUNK_SIZE / 2;
+                const centerZ = cZ * CHUNK_SIZE - CONFIG.width / 2 + CHUNK_SIZE / 2;
+
+                treeChunkData.push({
+                    high: treesHighChunk,
+                    low: treesLowChunk,
+                    center: new THREE.Vector3(centerX, 0, centerZ)
+                });
+            });
+
+            scene.add(treeGroup);
+
             players.forEach(p => {
                 p.mesh.traverse(child => {
                     child.frustumCulled = false;
@@ -2649,12 +2784,12 @@
                                     type: 'HIT_EVENT',
                                     targetIdx: p.index,
                                     attackerIdx: myPlayerIndex,
-                                    dmg: 10
+                                    dmg: 20
                                 };
 
                                 if (isHost) {
                                     socket.emit('host_broadcast', { roomCode: myRoomCode, data: hitData });
-                                    if (p.index === myPlayerIndex) p.takeDamage(10, myPlayerIndex);
+                                    if (p.index === myPlayerIndex) p.takeDamage(20, myPlayerIndex);
                                 } else {
                                     socket.emit('client_send', { roomCode: myRoomCode, data: hitData });
                                 }
@@ -2733,10 +2868,26 @@
 
                 updateHUD(me);
 
-                // Track Shadow System LOD Camera Position
-                treeShaderUniforms.forEach(u => u.uMainCameraPos.value.copy(me.camera.position));
+                const camPos = me.camera.position;
+                for (let i = 0; i < treeChunkData.length; i++) {
+                    const chunk = treeChunkData[i];
+                    const dist = Math.sqrt(
+                        Math.pow(chunk.center.x - camPos.x, 2) + 
+                        Math.pow(chunk.center.z - camPos.z, 2)
+                    );
+                    
+                    if (dist < 2000) {
+                        chunk.high.visible = true;
+                        chunk.low.visible = false;
+                    } else if (dist < CONFIG.lodDistance + 2000) {
+                        chunk.high.visible = false;
+                        chunk.low.visible = true;
+                    } else {
+                        chunk.high.visible = false;
+                        chunk.low.visible = false;
+                    }
+                }
 
-                // Update Cascaded Shadow Maps dynamically
                 me.camera.updateMatrixWorld();
                 if (csm) csm.update();
 
