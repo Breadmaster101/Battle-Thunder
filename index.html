@@ -2654,7 +2654,7 @@
 
                                 if (isHost) {
                                     socket.emit('host_broadcast', { roomCode: myRoomCode, data: hitData });
-                                    if (p.index === myPlayerIndex) p.takeDamage(20, myPlayerIndex);
+                                    if (p.index === myPlayerIndex) p.takeDamage(10, myPlayerIndex);
                                 } else {
                                     socket.emit('client_send', { roomCode: myRoomCode, data: hitData });
                                 }
