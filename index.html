@@ -553,18 +553,20 @@
             const nx = x / CONFIG.width;
             const nz = z / CONFIG.width;
 
+            // 1. Core Geology: The Great Glen Fault (Diagonal)
             const faultLine = Math.abs(nx + nz);
-            const alongFault = (nx - nz); 
+            const alongFault = (nx - nz);
 
+            // 2. Base Noise Layers
+            let moors = simplex.noise(nx * 1.5 + mapSeed, nz * 1.5 + mapSeed) * 70;
+            moors += simplex.noise(nx * 4.0, nz * 4.0) * 25;
+
+            // 3. Mountain Generation
+            // We define a mask so mountains only appear near the fault line but fade out.
+            // Also need the taper logic for the "glen trench" to be consistent.
             let taperNoise = simplex.noise(nx * 4.0 + 20, nz * 4.0 + 20) * 0.1;
             let taperDist = alongFault + taperNoise;
             const taperFactor = smoothstep(-0.2, -0.6, taperDist);
-
-            const trenchWidth = 0.08 * (1.0 - taperFactor * 0.9);
-            const glenTrench = smoothstep(0.0, trenchWidth, faultLine);
-
-            let moors = simplex.noise(nx * 1.5 + mapSeed, nz * 1.5 + mapSeed) * 70;
-            moors += simplex.noise(nx * 4.0, nz * 4.0) * 25;
 
             let mountainMask = smoothstep(0.02, 0.25, faultLine);
             mountainMask += taperFactor * 0.5;
@@ -576,34 +578,59 @@
             let weight = 1.0;
             for (let i = 0; i < 6; i++) {
                 let n = 1.0 - Math.abs(simplex.noise(nx * freq + 100, nz * freq + 100));
-                
-                n = n * n * (3.0 - 2.0 * n); 
-                
-                n *= weight; 
+                n = n * n * (3.0 - 2.0 * n);
+                n *= weight;
                 weight = Math.max(0.0, Math.min(1.0, n * 2.5));
                 peaks += n * amp;
                 amp *= 0.45;
                 freq *= 2.2;
             }
 
+            // Combine mountains and high-altitude moors
             let height = moors + (peaks * mountainMask);
 
             let valleyNoise = simplex.noise(nx * 3.0 + 50, nz * 3.0 + 50);
-            let valleyScale = valleyNoise * valleyNoise; 
+            let valleyScale = valleyNoise * valleyNoise;
             height *= (0.4 + 0.6 * valleyScale);
 
             let crags = simplex.noise(nx * 20.0, nz * 20.0) * 20;
             height += crags * Math.max(0, (height / 200.0));
+            height += 30; // Base lift
 
-            height += 30;
-
-            const targetLochHeight = CONFIG.waterLevel - 100;
-            const carveAmount = (1.0 - glenTrench) * (1.0 - taperFactor);
-            height = THREE.MathUtils.lerp(height, targetLochHeight, carveAmount);
-
+            // 4. Coastal Calculation & Rolling Hills
+            // We need to calculate distance to the ocean edge.
             let coastNoise = simplex.noise(nx * 5.0, nz * 5.0) * 0.15;
             let oceanDist = alongFault + coastNoise;
-            const oceanDrop = smoothstep(0.3, 0.7, oceanDist);
+
+            // Define the transition from mountainous moors to coastal rolling hills.
+            // Start transitioning earlier so hills have space to roll down.
+            const moorTransition = smoothstep(0.15, 0.65, oceanDist);
+
+            // Create a gradient for the rolling hills so they slope down to the sea.
+            // When oceanDist is low (inland), value is 1.0. Near ocean, value is 0.0.
+            let hillGradient = 1.0 - smoothstep(0.15, 0.75, oceanDist);
+            
+            // Rolling hills logic:
+            // Take the base moors noise, scale it, and offset it by the gradient.
+            // This ensures high hills inland that become low hills near the water.
+            let coastalRollingHills = (moors * 0.6) + (hillGradient * 150) + 15;
+
+            // Blend the high mountain terrain into the rolling coastal hills
+            height = THREE.MathUtils.lerp(height, coastalRollingHills, moorTransition);
+
+            // 5. The Glen Trench (The Loch)
+            // CRITICAL: We apply the trench carving AFTER the coastal blend.
+            // This ensures the water cuts through the rolling hills to reach the ocean.
+            
+            const trenchWidth = 0.08 * (1.0 - taperFactor * 0.9);
+            const glenTrench = smoothstep(0.0, trenchWidth, faultLine);
+            const targetLochHeight = CONFIG.waterLevel - 100;
+            const carveAmount = (1.0 - glenTrench) * (1.0 - taperFactor);
+            
+            height = THREE.MathUtils.lerp(height, targetLochHeight, carveAmount);
+
+            // 6. Final Continental Drop to Ocean
+            const oceanDrop = smoothstep(0.65, 0.95, oceanDist);
             const oceanTarget = CONFIG.waterLevel - 150;
             height = THREE.MathUtils.lerp(height, oceanTarget, oceanDrop);
 
