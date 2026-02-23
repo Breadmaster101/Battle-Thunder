@@ -192,6 +192,8 @@
 
         .radar-blip {
             position: absolute;
+            top: 0;
+            left: 0;
             width: 8px;
             height: 8px;
             background: #ff3333;
@@ -461,6 +463,13 @@
         let lodUniforms = {
             uPlayerPos: { value: new THREE.Vector3() }
         };
+
+        // Pre-allocated object caches for Render Loop (Prevents GC Pauses)
+        const _audioForward = new THREE.Vector3();
+        const _audioUp = new THREE.Vector3();
+        const _blackColor = new THREE.Color(0x000000);
+        const _cachedFogColor = new THREE.Color();
+        const _hudCache = { speed: -1, throt: -1, alt: -1, hdg: -1, hp: -1, stall: null };
 
         // Global Erosion & Terrain Data
         let erodedHeightmap = null;
@@ -2508,11 +2517,13 @@
                 treesHighChunk.castShadow = true;
                 treesHighChunk.receiveShadow = true;
                 treesHighChunk.customDepthMaterial = treeHighDepthMat;
+                treesHighChunk.frustumCulled = false; // Prevents sudden GPU geometry upload spikes on turns
                 
                 const treesLowChunk = new THREE.InstancedMesh(geometryTri, treeMatLow, chunkPositions.length);
                 treesLowChunk.castShadow = true; 
                 treesLowChunk.receiveShadow = false;
                 treesLowChunk.customDepthMaterial = treeLowDepthMat; 
+                treesLowChunk.frustumCulled = false; // Prevents sudden GPU geometry upload spikes on turns
 
                 chunkPositions.forEach((t, i) => {
                     dummy.position.set(t.x, t.y, t.z);
@@ -2583,6 +2594,9 @@
             fxaaPass.material.uniforms['resolution'].value.x = 1 / (window.innerWidth * pixelRatio);
             fxaaPass.material.uniforms['resolution'].value.y = 1 / (window.innerHeight * pixelRatio);
             finalComposer.addPass(fxaaPass);
+
+            // Pre-compile all shaders immediately before removing the loading overlay
+            renderer.compile(scene, me.camera);
 
             document.getElementById('bake-overlay').style.display = 'none';
             gameActive = true;
@@ -2666,23 +2680,45 @@
         }
 
         function updateHUD(me) {
-            document.getElementById('speedVal').innerText = Math.round(me.speed * 160);
-            document.getElementById('throtVal').innerText = Math.round(me.throttle * 100);
-            document.getElementById('hpVal').innerText = me.hp;
+            const speed = Math.round(me.speed * 160);
+            if (speed !== _hudCache.speed) {
+                document.getElementById('speedVal').innerText = speed;
+                _hudCache.speed = speed;
+            }
+
+            const throt = Math.round(me.throttle * 100);
+            if (throt !== _hudCache.throt) {
+                document.getElementById('throtVal').innerText = throt;
+                _hudCache.throt = throt;
+            }
+            
+            if (me.hp !== _hudCache.hp) {
+                document.getElementById('hpVal').innerText = me.hp;
+                _hudCache.hp = me.hp;
+            }
 
             const alt = Math.round(me.mesh.position.y - CONFIG.waterLevel);
-            const altEl = document.getElementById('altVal');
-            altEl.innerText = alt;
-            altEl.style.color = alt < 20 ? 'red' : 'white';
+            if (alt !== _hudCache.alt) {
+                const altEl = document.getElementById('altVal');
+                altEl.innerText = alt;
+                altEl.style.color = alt < 20 ? 'red' : 'white';
+                _hudCache.alt = alt;
+            }
 
             _tempVec.set(0, 0, -1).applyQuaternion(me.mesh.quaternion);
             const headingAngle = Math.atan2(_tempVec.x, _tempVec.z);
             let degrees = Math.round(headingAngle * (180 / Math.PI));
             if (degrees < 0) degrees += 360;
-            document.getElementById('headingVal').innerText = degrees;
+            
+            if (degrees !== _hudCache.hdg) {
+                document.getElementById('headingVal').innerText = degrees;
+                _hudCache.hdg = degrees;
+            }
 
-            if (me.isStalled) document.getElementById('stallWarn').style.display = 'block';
-            else document.getElementById('stallWarn').style.display = 'none';
+            if (me.isStalled !== _hudCache.stall) {
+                document.getElementById('stallWarn').style.display = me.isStalled ? 'block' : 'none';
+                _hudCache.stall = me.isStalled;
+            }
 
             players.forEach(p => {
                 if (p.index === myPlayerIndex) return;
@@ -2702,8 +2738,9 @@
                         const ratio = 65 / dist;
                         rX *= ratio; rY *= ratio;
                     }
-                    blip.style.left = (70 + rX) + 'px';
-                    blip.style.top = (70 + rY) + 'px';
+                    
+                    // Update layout visually without forcing a DOM reflow
+                    blip.style.transform = `translate(-50%, -50%) translate(${70 + rX}px, ${70 + rY}px)`;
                     blip.style.display = 'block';
                 } else {
                     blip.style.display = 'none';
@@ -2844,19 +2881,20 @@
                 if (audioCtx.listener.positionX) {
                     const camPos = me.camera.position;
                     const camQuat = me.camera.quaternion;
-                    const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camQuat);
-                    const up = new THREE.Vector3(0, 1, 0).applyQuaternion(camQuat);
+                    
+                    _audioForward.set(0, 0, -1).applyQuaternion(camQuat);
+                    _audioUp.set(0, 1, 0).applyQuaternion(camQuat);
 
                     const t = audioCtx.currentTime;
                     audioCtx.listener.positionX.setTargetAtTime(camPos.x, t, 0.1);
                     audioCtx.listener.positionY.setTargetAtTime(camPos.y, t, 0.1);
                     audioCtx.listener.positionZ.setTargetAtTime(camPos.z, t, 0.1);
-                    audioCtx.listener.forwardX.setTargetAtTime(forward.x, t, 0.1);
-                    audioCtx.listener.forwardY.setTargetAtTime(forward.y, t, 0.1);
-                    audioCtx.listener.forwardZ.setTargetAtTime(forward.z, t, 0.1);
-                    audioCtx.listener.upX.setTargetAtTime(up.x, t, 0.1);
-                    audioCtx.listener.upY.setTargetAtTime(up.y, t, 0.1);
-                    audioCtx.listener.upZ.setTargetAtTime(up.z, t, 0.1);
+                    audioCtx.listener.forwardX.setTargetAtTime(_audioForward.x, t, 0.1);
+                    audioCtx.listener.forwardY.setTargetAtTime(_audioForward.y, t, 0.1);
+                    audioCtx.listener.forwardZ.setTargetAtTime(_audioForward.z, t, 0.1);
+                    audioCtx.listener.upX.setTargetAtTime(_audioUp.x, t, 0.1);
+                    audioCtx.listener.upY.setTargetAtTime(_audioUp.y, t, 0.1);
+                    audioCtx.listener.upZ.setTargetAtTime(_audioUp.z, t, 0.1);
                 }
 
                 updateHUD(me);
@@ -2878,16 +2916,16 @@
 
                     sky.visible = false;
                     const oldBg = scene.background;
-                    scene.background = new THREE.Color(0x000000);
+                    scene.background = _blackColor;
 
-                    const oldFogC = scene.fog.color.clone();
-                    scene.fog.color.set(0x000000);
+                    _cachedFogColor.copy(scene.fog.color);
+                    scene.fog.color.setHex(0x000000);
 
                     bloomComposer.render();
 
                     sky.visible = true;
                     scene.background = oldBg;
-                    scene.fog.color.copy(oldFogC);
+                    scene.fog.color.copy(_cachedFogColor);
 
                     finalComposer.render();
                 } else {
