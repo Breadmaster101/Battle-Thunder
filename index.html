@@ -526,9 +526,9 @@
             const nx = x / 6000;
             const nz = z / 6000;
 
-            let continent = simplex.noise(nx * 0.5 + mapSeed, nz * 0.5 + mapSeed);
-            continent = continent * 0.5 + 0.5;
-            continent = smoothstep(0.2, 0.8, continent);
+            let continentRaw = simplex.noise(nx * 0.5 + mapSeed, nz * 0.5 + mapSeed) * 0.5 + 0.5;
+            let continent = smoothstep(0.1, 0.6, continentRaw);
+            let inland = smoothstep(0.4, 0.9, continentRaw);
 
             // Softer ridges: fewer octaves, lower amplitude, gentler weighting
             let ridge = 0;
@@ -545,22 +545,54 @@
             }
             // Apply a soft-clamp so ridges never spike too sharply
             ridge = ridge / (1.0 + ridge * 0.3);
-            ridge *= 450;
+
+            // Tilted, rugged terracing for ridges
+            let mSteps = 10.0;
+            let warp = simplex.noise(nx * 8.0, nz * 8.0) * 0.04;
+            let wRidge = ridge + warp;
+            
+            let rVal = wRidge * mSteps;
+            let rFloor = Math.floor(rVal);
+            let rFract = rVal - rFloor;
+            
+            let tilt = rFract * 0.35; 
+            let riser = smoothstep(0.5, 1.0, rFract) * 0.65; 
+            let mTerraced = (rFloor + tilt + riser) / mSteps;
+            
+            ridge = THREE.MathUtils.lerp(ridge, mTerraced, 0.7) * 900;
 
             let plateau = simplex.noise(nx * 2.0 + 50, nz * 2.0 + 50) * 0.5 + 0.5;
-            let pSteps = 4;
-            let pStepNoise = smoothstep(0.25, 0.75, (plateau * pSteps) % 1.0);
-            let pTerraced = (Math.floor(plateau * pSteps) + pStepNoise) / pSteps;
-            let mesa = pTerraced * 350;
+            
+            // Tilted, rugged terracing for plateaus
+            let pSteps = 6.0;
+            let pWarp = simplex.noise(nx * 6.0 + 20, nz * 6.0 + 20) * 0.05;
+            let wPlateau = plateau + pWarp;
+
+            let pVal = wPlateau * pSteps;
+            let pFloor = Math.floor(pVal);
+            let pFract = pVal - pFloor;
+
+            let pTilt = pFract * 0.25;
+            let pRiser = smoothstep(0.6, 1.0, pFract) * 0.75;
+            let pTerraced = (pFloor + pTilt + pRiser) / pSteps;
+            
+            let mesa = THREE.MathUtils.lerp(plateau, pTerraced, 0.8) * 350;
 
             let hills = (simplex.noise(nx * 3.0 + 100, nz * 3.0 + 100) * 0.5 + 0.5) * 200;
+            let foothills = hills + (simplex.noise(nx * 1.5 + 400, nz * 1.5 + 400) * 0.5 + 0.5) * 350;
 
             let biomeSelector = simplex.noise(nx * 0.8 + 200, nz * 0.8 + 200);
 
             let landHeight = 0;
-            if (biomeSelector > 0.15) {
-                let t = smoothstep(0.15, 0.45, biomeSelector);
-                landHeight = THREE.MathUtils.lerp(hills, ridge, t);
+            if (biomeSelector > 0.05) {
+                let foothillTransition = smoothstep(0.05, 0.35, biomeSelector);
+                let mountainTransition = smoothstep(0.25, 0.6, biomeSelector);
+                
+                let baseTerrain = THREE.MathUtils.lerp(hills, foothills, foothillTransition);
+                
+                let easedMountainTransition = Math.pow(mountainTransition, 1.8);
+                
+                landHeight = THREE.MathUtils.lerp(baseTerrain, ridge, easedMountainTransition);
             } else if (biomeSelector < -0.15) {
                 let t = smoothstep(-0.15, -0.45, biomeSelector);
                 landHeight = THREE.MathUtils.lerp(hills, mesa, t);
@@ -568,9 +600,22 @@
                 landHeight = hills;
             }
 
+            // Force the coastline to be made of lower rolling hills instead of sheer mountains
+            landHeight = THREE.MathUtils.lerp(hills, landHeight, inland);
+
             let canyonNoise = Math.abs(simplex.noise(nx * 1.5 + 300, nz * 1.5 + 300));
-            let canyonMask = smoothstep(0.02, 0.15, canyonNoise);
-            landHeight = THREE.MathUtils.lerp(CONFIG.waterLevel - 20, landHeight, canyonMask);
+            // Widen canyons as elevation increases so they don't form sheer cliffs in mountains
+            let canyonEdge = THREE.MathUtils.lerp(0.15, 0.45, smoothstep(200, 600, landHeight));
+            let canyonMask = smoothstep(0.02, canyonEdge, canyonNoise);
+
+            // Prevent sheer cliffs by smoothly fading out canyons entirely at higher elevations
+            let canyonFade = smoothstep(300, 650, landHeight);
+            canyonMask = THREE.MathUtils.lerp(canyonMask, 1.0, canyonFade);
+
+            // Raise the canyon floor in mountainous areas
+            let canyonFloor = THREE.MathUtils.lerp(CONFIG.waterLevel - 20, 300, smoothstep(200, 800, landHeight));
+
+            landHeight = THREE.MathUtils.lerp(canyonFloor, landHeight, canyonMask);
 
             let finalHeight = THREE.MathUtils.lerp(CONFIG.waterLevel - 80, landHeight, continent);
 
@@ -614,7 +659,7 @@
             leavesGeo.translate(0, 10, 0);
             const leavesColors = [];
             for (let i = 0; i < leavesGeo.attributes.position.count; i++) {
-                leavesColors.push(0.35, 0.65, 0.20); 
+                leavesColors.push(0.35, 0.65, 0.20);
             }
             leavesGeo.setAttribute('color', new THREE.Float32BufferAttribute(leavesColors, 3));
 
@@ -1745,15 +1790,15 @@
             document.body.appendChild(renderer.domElement);
 
             scene = new THREE.Scene();
-            scene.background = new THREE.Color(0xe8d0c0);
-            scene.fog = new THREE.FogExp2(0xe8d0c0, CONFIG.fogDensity);
+            scene.background = new THREE.Color(0xeaf4fc);
+            scene.fog = new THREE.FogExp2(0xeaf4fc, CONFIG.fogDensity);
 
             // Sky Dome
             const skyGeo = new THREE.SphereGeometry(25000, 32, 32);
             const skyMat = new THREE.ShaderMaterial({
                 uniforms: {
                     topColor: { value: new THREE.Color(0x6ebcf0) },
-                    bottomColor: { value: new THREE.Color(0xe8d0c0) },
+                    bottomColor: { value: new THREE.Color(0xeaf4fc) },
                     offset: { value: 400 },
                     exponent: { value: 0.6 },
                     sunPosition: { value: new THREE.Vector3(800, 500, -800).normalize() }
@@ -1799,9 +1844,9 @@
             sunGroup.add(sunCore);
 
             const glowGeo1 = new THREE.IcosahedronGeometry(900, 0);
-            const glowMat1 = new THREE.MeshBasicMaterial({ 
-                color: 0xffeedd, 
-                transparent: true, 
+            const glowMat1 = new THREE.MeshBasicMaterial({
+                color: 0xffeedd,
+                transparent: true,
                 opacity: 0.4,
                 blending: THREE.AdditiveBlending,
                 depthWrite: false
@@ -1811,9 +1856,9 @@
             sunGroup.add(sunGlow1);
 
             const glowGeo2 = new THREE.IcosahedronGeometry(1300, 0);
-            const glowMat2 = new THREE.MeshBasicMaterial({ 
-                color: 0xffccaa, 
-                transparent: true, 
+            const glowMat2 = new THREE.MeshBasicMaterial({
+                color: 0xffccaa,
+                transparent: true,
                 opacity: 0.15,
                 blending: THREE.AdditiveBlending,
                 depthWrite: false
@@ -1828,22 +1873,49 @@
 
             waterMeshes = [];
 
-            const waterGeo = new THREE.PlaneGeometry(CONFIG.width, CONFIG.width, 64, 64);
+            let waterGeoBase = new THREE.PlaneGeometry(CONFIG.width, CONFIG.width, 100, 100);
+            const wSegSize = CONFIG.width / 100;
+            const wPosBase = waterGeoBase.attributes.position;
+            for (let i = 0; i < wPosBase.count; i++) {
+                let vx = wPosBase.getX(i);
+                let vy = wPosBase.getY(i);
+                vx += (Math.random() - 0.5) * wSegSize * 0.8;
+                vy += (Math.random() - 0.5) * wSegSize * 0.8;
+                wPosBase.setX(i, vx);
+                wPosBase.setY(i, vy);
+            }
+
+            const waterGeo = waterGeoBase.toNonIndexed();
+            const wPos = waterGeo.attributes.position;
+            waterGeo.userData.originalX = new Float32Array(wPos.count);
+            waterGeo.userData.originalY = new Float32Array(wPos.count);
+
+            const waterColors = [];
+            const colorDeep = new THREE.Color(0x2e8b9e);
+
+            for (let i = 0; i < wPos.count; i += 3) {
+                for (let v = 0; v < 3; v++) {
+                    const idx = i + v;
+                    waterGeo.userData.originalX[idx] = wPos.getX(idx);
+                    waterGeo.userData.originalY[idx] = wPos.getY(idx);
+                    waterColors.push(colorDeep.r, colorDeep.g, colorDeep.b);
+                }
+            }
+
+            waterGeo.setAttribute('color', new THREE.Float32BufferAttribute(waterColors, 3));
+
             const waterMat = new THREE.MeshStandardMaterial({
-                color: 0x2e8b9e, // Warm teal-blue stylized water
+                color: 0xffffff, // Use vertex colors fully
                 transparent: true,
                 opacity: 0.82,
                 roughness: 0.2,
                 metalness: 0.5,
-                flatShading: true
+                flatShading: true,
+                vertexColors: true
             });
             const mainWater = new THREE.Mesh(waterGeo, waterMat);
             mainWater.rotation.x = -Math.PI / 2;
             mainWater.position.y = CONFIG.waterLevel;
-
-            const pos = waterGeo.attributes.position;
-            waterGeo.userData.originalZ = new Float32Array(pos.count);
-            for (let i = 0; i < pos.count; i++) waterGeo.userData.originalZ[i] = pos.getZ(i);
 
             scene.add(mainWater);
             waterMeshes.push(mainWater);
@@ -1936,10 +2008,7 @@
                 const rv = simplex.noise(niPos.getX(i) * 0.01, niPos.getZ(i) * 0.01);
 
                 // Stylized, warm palette – Ghibli-inspired
-                if (avgY >= CONFIG.waterLevel - 2 && avgY <= CONFIG.waterLevel + 1.5 && slope < 0.2) {
-                    // Shoreline foam
-                    colorObj.setHex(0xffffff);
-                } else if (avgY < CONFIG.waterLevel + 15 && slope < 0.15) {
+                if (avgY < CONFIG.waterLevel + 15 && slope < 0.15) {
                     // Warm golden sand
                     colorObj.setHex(0xdec98a);
                     if (rv > 0.5) colorObj.setHex(0xe8d9a0);
@@ -2025,7 +2094,7 @@
                         if (rockPositions.length < 5000 && myRandom() > 0.5) {
                             rockPositions.push({ x, y: y - 1, z, scale: scale * 1.5, rot });
                         }
-                    } 
+                    }
                     else if (slope < 0.3 && y < 350) {
                         if (clumpNoise > 0.2) {
                             if (pinePositions.length + deciduousPositions.length < CONFIG.treeCount) {
@@ -2275,13 +2344,13 @@
 
             waterMeshes.forEach(w => {
                 const pos = w.geometry.attributes.position;
-                const orig = w.geometry.userData.originalZ;
+                const origX = w.geometry.userData.originalX;
+                const origY = w.geometry.userData.originalY;
                 for (let i = 0; i < pos.count; i++) {
-                    const u = orig[i];
-                    const x = pos.getX(i);
-                    // Smoother, broader waves instead of the spikey cross multiplication
-                    const wave = (Math.sin(x * 0.02 + elapTime * 1.5) + Math.cos(u * 0.02 + elapTime * 1.5)) * 1.2;
-                    pos.setZ(i, u + wave);
+                    const ox = origX[i];
+                    const oy = origY[i];
+                    const wave = (Math.sin(ox * 0.02 + elapTime * 1.5) + Math.cos(oy * 0.02 + elapTime * 1.5)) * 1.5;
+                    pos.setZ(i, wave);
                 }
                 pos.needsUpdate = true;
                 w.geometry.computeVertexNormals();
