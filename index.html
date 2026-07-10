@@ -806,6 +806,13 @@
             <div class="stat-row"><span>ALTITUDE</span><span class="stat-val" id="altValContainer"><span id="altVal">0</span> M</span></div>
             <div class="stat-row"><span>HEADING</span><span class="stat-val"><span id="headingVal">0</span>°</span></div>
             <div class="stat-row health-row"><span>HEALTH</span><span class="stat-val"><span id="hpVal">100</span>%</span></div>
+            
+            <div class="stat-row"><span>AMMO</span><span class="stat-val"><span id="ammoText">40</span></span></div>
+            <div class="ammo-bar-container" style="width:100%; height:3px; background:rgba(255, 255, 255, 0.15); margin-top:5px; position:relative; overflow:hidden;">
+                <div id="ammoBar" style="position:absolute; top:0; left:0; height:100%; width:100%; background:#ffffff; transition: width 0.05s linear;"></div>
+            </div>
+            <div id="reloadWarn" style="display:none; font-size: 0.85rem; font-weight: 600; letter-spacing: 0.15em; color: #ffaa00; text-transform: uppercase; margin-top: 5px; text-align: center; animation: blink 0.5s infinite alternate;">RELOADING...</div>
+
             <div id="stallWarn" style="display:none;">!! STALL WARNING !!</div>
 
             <div class="radar" id="radar">
@@ -1164,7 +1171,7 @@
 
         const _audioForward = new THREE.Vector3();
         const _audioUp = new THREE.Vector3();
-        const _hudCache = { speed: -1, throt: -1, alt: -1, hdg: -1, hp: -1, stall: null };
+        const _hudCache = { speed: -1, throt: -1, alt: -1, hdg: -1, hp: -1, stall: null, ammo: -1, reloading: null };
 
         let socket;
         let isHost = false;
@@ -2074,6 +2081,14 @@
                 this.isCrashed = false;
                 this.trailParticles = [];
                 this.lastShot = 0;
+                
+                // Weapon Cooldown & Magazine Variables
+                this.maxAmmo = 67;
+                this.currentAmmo = this.maxAmmo;
+                this.reloadTime = 5000; // 5 Seconds
+                this.isReloading = false;
+                this.reloadTimerStart = 0;
+
                 this.isStalled = false;
                 this.flashTimer = 0;
                 this.prevShootState = false;
@@ -2320,6 +2335,9 @@
                 this.speed = 1.0875;
                 this.throttle = 0.5;
                 this.hp = 100;
+                this.currentAmmo = this.maxAmmo;
+                this.isReloading = false;
+                this.reloadTimerStart = 0;
                 this.isCrashed = false;
                 this.lastAttackerName = null;
                 this.mesh.visible = true;
@@ -2393,8 +2411,23 @@
                 this.mesh.translateZ(-this.speed * timeScale);
 
                 const now = Date.now();
-                if (effShoot && now - this.lastShot > 80) {
+                
+                // Weapon logic and Reloading processing
+                if (this.isReloading) {
+                    if (now - this.reloadTimerStart >= this.reloadTime) {
+                        this.isReloading = false;
+                        this.currentAmmo = this.maxAmmo;
+                    }
+                }
+
+                if (!this.isReloading && effShoot && now - this.lastShot > 80) {
                     this.lastShot = now;
+                    this.currentAmmo--;
+                    if (this.currentAmmo <= 0) {
+                        this.isReloading = true;
+                        this.reloadTimerStart = now;
+                    }
+
                     _tempVec.set(0, 0, -4).applyMatrix4(this.mesh.matrixWorld);
                     const p = projectilePool.find(proj => !proj.isActive);
                     if (p) {
@@ -3347,6 +3380,32 @@ self.onmessage = function(e) {
             if (degrees !== _hudCache.hdg) {
                 document.getElementById('headingVal').innerText = degrees;
                 _hudCache.hdg = degrees;
+            }
+
+            // HUD Logic for Reloading Mechanics
+            if (me.isReloading) {
+                const now = Date.now();
+                let progress = (now - me.reloadTimerStart) / me.reloadTime;
+                if (progress > 1) progress = 1;
+                document.getElementById('ammoBar').style.width = (progress * 100) + "%";
+                
+                if (_hudCache.reloading !== true) {
+                    document.getElementById('ammoText').innerText = "0";
+                    document.getElementById('ammoText').style.color = '#ffaa00';
+                    document.getElementById('ammoBar').style.background = '#ffaa00';
+                    document.getElementById('reloadWarn').style.display = 'block';
+                    _hudCache.reloading = true;
+                }
+            } else {
+                if (_hudCache.ammo !== me.currentAmmo || _hudCache.reloading === true) {
+                    document.getElementById('ammoText').innerText = me.currentAmmo;
+                    document.getElementById('ammoText').style.color = '#ffffff';
+                    document.getElementById('ammoBar').style.width = ((me.currentAmmo / me.maxAmmo) * 100) + "%";
+                    document.getElementById('ammoBar').style.background = '#ffffff';
+                    document.getElementById('reloadWarn').style.display = 'none';
+                    _hudCache.ammo = me.currentAmmo;
+                    _hudCache.reloading = false;
+                }
             }
 
             // Only show stall warning if we are actually alive and stalled
