@@ -652,6 +652,63 @@
         let uiTargetCamPos = new THREE.Vector3(14, 5, -14);
         let uiTargetLookAt = new THREE.Vector3(0, 0, 0);
         let uiCurrentLookAt = new THREE.Vector3(0, 0, 0);
+        let wireMat;
+
+        // Custom function to create a wireframe that looks identical to `wireframe: true`
+        // but supports our custom per-line shrinking shader.
+        function createWireframeMesh(geo) {
+            let nonIndexedGeo = geo;
+            if (geo.index) {
+                nonIndexedGeo = geo.toNonIndexed();
+            }
+            
+            const posAttr = nonIndexedGeo.attributes.position;
+            const numTriangles = posAttr.count / 3;
+            
+            // 3 lines per triangle, 2 vertices per line, 3 floats per vertex
+            const linePosArray = new Float32Array(numTriangles * 18);
+            const centerArray = new Float32Array(numTriangles * 18);
+            
+            let outIdx = 0;
+            for (let i = 0; i < numTriangles; i++) {
+                const idx = i * 3;
+                const ax = posAttr.getX(idx),   ay = posAttr.getY(idx),   az = posAttr.getZ(idx);
+                const bx = posAttr.getX(idx+1), by = posAttr.getY(idx+1), bz = posAttr.getZ(idx+1);
+                const cx = posAttr.getX(idx+2), cy = posAttr.getY(idx+2), cz = posAttr.getZ(idx+2);
+                
+                // Line A-B
+                linePosArray[outIdx] = ax; linePosArray[outIdx+1] = ay; linePosArray[outIdx+2] = az;
+                linePosArray[outIdx+3] = bx; linePosArray[outIdx+4] = by; linePosArray[outIdx+5] = bz;
+                let mx = (ax+bx)/2, my = (ay+by)/2, mz = (az+bz)/2;
+                centerArray[outIdx] = mx; centerArray[outIdx+1] = my; centerArray[outIdx+2] = mz;
+                centerArray[outIdx+3] = mx; centerArray[outIdx+4] = my; centerArray[outIdx+5] = mz;
+                outIdx += 6;
+                
+                // Line B-C
+                linePosArray[outIdx] = bx; linePosArray[outIdx+1] = by; linePosArray[outIdx+2] = bz;
+                linePosArray[outIdx+3] = cx; linePosArray[outIdx+4] = cy; linePosArray[outIdx+5] = cz;
+                mx = (bx+cx)/2; my = (by+cy)/2; mz = (bz+cz)/2;
+                centerArray[outIdx] = mx; centerArray[outIdx+1] = my; centerArray[outIdx+2] = mz;
+                centerArray[outIdx+3] = mx; centerArray[outIdx+4] = my; centerArray[outIdx+5] = mz;
+                outIdx += 6;
+                
+                // Line C-A
+                linePosArray[outIdx] = cx; linePosArray[outIdx+1] = cy; linePosArray[outIdx+2] = cz;
+                linePosArray[outIdx+3] = ax; linePosArray[outIdx+4] = ay; linePosArray[outIdx+5] = az;
+                mx = (cx+ax)/2; my = (cy+ay)/2; mz = (cz+az)/2;
+                centerArray[outIdx] = mx; centerArray[outIdx+1] = my; centerArray[outIdx+2] = mz;
+                centerArray[outIdx+3] = mx; centerArray[outIdx+4] = my; centerArray[outIdx+5] = mz;
+                outIdx += 6;
+            }
+            
+            const wireGeo = new THREE.BufferGeometry();
+            wireGeo.setAttribute('position', new THREE.BufferAttribute(linePosArray, 3));
+            wireGeo.setAttribute('lineCenter', new THREE.BufferAttribute(centerArray, 3));
+            
+            const lines = new THREE.LineSegments(wireGeo, wireMat);
+            lines.renderOrder = 999; // Ensure it renders on top of transparent solid meshes
+            return lines;
+        }
 
         function initUI3D() {
             const container = document.getElementById('ui-3d-container');
@@ -665,12 +722,31 @@
             uiRenderer.setPixelRatio(window.devicePixelRatio);
             container.appendChild(uiRenderer.domElement);
 
-            const wireMat = new THREE.MeshBasicMaterial({
-                color: 0xaaaaaa,
-                wireframe: true,
+            // Custom shader to allow line ends to shrink towards their own centers
+            wireMat = new THREE.ShaderMaterial({
+                uniforms: {
+                    color: { value: new THREE.Color(0xaaaaaa) },
+                    opacity: { value: 0.35 },
+                    shrinkFactor: { value: 0.0 }
+                },
+                vertexShader: `
+                    attribute vec3 lineCenter;
+                    uniform float shrinkFactor;
+                    void main() {
+                        vec3 pos = mix(position, lineCenter, shrinkFactor);
+                        gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
+                    }
+                `,
+                fragmentShader: `
+                    uniform vec3 color;
+                    uniform float opacity;
+                    void main() {
+                        gl_FragColor = vec4(color, opacity);
+                    }
+                `,
                 transparent: true,
-                opacity: 0.35,
                 depthWrite: false,
+                depthTest: false, // Prevents depth clipping with the plane model
                 blending: THREE.AdditiveBlending
             });
 
@@ -678,32 +754,32 @@
 
             const bodyGeo = new THREE.CylinderGeometry(1.1, 0.9, 7, 10);
             bodyGeo.rotateX(Math.PI / 2);
-            uiPlane.add(new THREE.Mesh(bodyGeo, wireMat));
+            uiPlane.add(createWireframeMesh(bodyGeo));
 
             const noseGeo = new THREE.CylinderGeometry(0.9, 0.8, 3.5, 10);
             noseGeo.rotateX(Math.PI / 2);
             noseGeo.translate(0, 0, -5.25);
-            uiPlane.add(new THREE.Mesh(noseGeo, wireMat));
+            uiPlane.add(createWireframeMesh(noseGeo));
 
             const spinnerGeo = new THREE.CylinderGeometry(0.8, 0.1, 2, 10);
             spinnerGeo.rotateX(Math.PI / 2);
             spinnerGeo.translate(0, 0, -8);
-            uiPlane.add(new THREE.Mesh(spinnerGeo, wireMat));
+            uiPlane.add(createWireframeMesh(spinnerGeo));
 
             const tailBoomGeo = new THREE.CylinderGeometry(0.4, 1.1, 6, 10);
             tailBoomGeo.rotateX(Math.PI / 2);
             tailBoomGeo.translate(0, 0, 6.5);
-            uiPlane.add(new THREE.Mesh(tailBoomGeo, wireMat));
+            uiPlane.add(createWireframeMesh(tailBoomGeo));
 
             const cockpitGeo = new THREE.SphereGeometry(1.1, 8, 8);
             cockpitGeo.scale(1, 0.8, 2.5);
             cockpitGeo.translate(0, 0.8, -0.5);
-            uiPlane.add(new THREE.Mesh(cockpitGeo, wireMat));
+            uiPlane.add(createWireframeMesh(cockpitGeo));
 
             const wGeo = new THREE.BoxGeometry(7, 0.2, 3);
             wGeo.translate(3.5, 0, 0.5);
             
-            const leftWing = new THREE.Mesh(wGeo, wireMat);
+            const leftWing = createWireframeMesh(wGeo);
             leftWing.position.set(0.8, -0.2, -1);
             leftWing.rotation.x = -0.05;
             leftWing.rotation.y = -0.2;
@@ -711,20 +787,20 @@
 
             const wTipGeo = new THREE.BoxGeometry(0.5, 0.21, 3);
             wTipGeo.translate(7.25, 0, 0.5);
-            const leftTip = new THREE.Mesh(wTipGeo, wireMat);
+            const leftTip = createWireframeMesh(wTipGeo);
             leftTip.position.set(0.8, -0.2, -1);
             leftTip.rotation.x = -0.05;
             leftTip.rotation.y = -0.2;
             uiPlane.add(leftTip);
 
-            const rightWing = new THREE.Mesh(wGeo, wireMat);
+            const rightWing = createWireframeMesh(wGeo);
             rightWing.position.set(-0.8, -0.2, -1);
             rightWing.rotation.x = -0.05;
             rightWing.rotation.y = 0.2;
             rightWing.scale.x = -1;
             uiPlane.add(rightWing);
 
-            const rightTip = new THREE.Mesh(wTipGeo, wireMat);
+            const rightTip = createWireframeMesh(wTipGeo);
             rightTip.position.set(-0.8, -0.2, -1);
             rightTip.rotation.x = -0.05;
             rightTip.rotation.y = 0.2;
@@ -733,7 +809,7 @@
 
             const hStabGeo = new THREE.BoxGeometry(5, 0.15, 2);
             hStabGeo.translate(0, 0, 1);
-            const hStab = new THREE.Mesh(hStabGeo, wireMat);
+            const hStab = createWireframeMesh(hStabGeo);
             hStab.position.set(0, 0.28, 8.5);
             uiPlane.add(hStab);
 
@@ -745,13 +821,13 @@
             }
             vStabGeo.computeVertexNormals();
 
-            const vStab = new THREE.Mesh(vStabGeo, wireMat);
+            const vStab = createWireframeMesh(vStabGeo);
             vStab.position.set(0, 2.0, 8.5);
             uiPlane.add(vStab);
 
             const scoopGeo = new THREE.BoxGeometry(1.2, 0.6, 3);
             scoopGeo.translate(0, -0.3, 0);
-            const scoop = new THREE.Mesh(scoopGeo, wireMat);
+            const scoop = createWireframeMesh(scoopGeo);
             scoop.position.set(0, -0.9, 1);
             uiPlane.add(scoop);
 
@@ -759,7 +835,7 @@
             const bladeGeo = new THREE.BoxGeometry(0.18, 3.6, 0.2);
             bladeGeo.translate(0, 1.8, 0);
             for (let i = 0; i < 3; i++) {
-                const blade = new THREE.Mesh(bladeGeo, wireMat);
+                const blade = createWireframeMesh(bladeGeo);
                 blade.rotation.z = (i / 3) * Math.PI * 2;
                 propeller.add(blade);
             }
@@ -853,7 +929,7 @@
         // --- Intro Cinematic State ---
         let introCinematicActive = false;
         let introCinematicTime = 0;
-        const INTRO_DURATION = 3.0;
+        const INTRO_DURATION = 3.5;
         let introWireframeMesh = null;
         let initialWireframeQuat = new THREE.Quaternion();
         const targetWireframeQuat = new THREE.Quaternion(0, 0, 0, 1);
@@ -3106,8 +3182,16 @@ self.onmessage = function(e) {
                         });
                     }
                     
-                    // Smoother Cubic Ease-In-Out transition
-                    const easeCubicInOut = progress < 0.5 ? 4 * progress * progress * progress : 1 - Math.pow(-2 * progress + 2, 3) / 2;
+                    // Split the transition into 3 strictly sequenced phases
+                    // 0.0 to 0.6: Camera/Wireframe physically move and align into final position
+                    // 0.6 to 0.8: Solid plane fades in completely while everything else holds still
+                    // 0.8 to 1.0: Wireframe lines shrink completely and vanish
+                    const moveProgress = Math.min(Math.max(progress / 0.6, 0.0), 1.0);
+                    const fadeProgress = Math.min(Math.max((progress - 0.6) / 0.2, 0.0), 1.0);
+                    const shrinkProgress = Math.min(Math.max((progress - 0.8) / 0.2, 0.0), 1.0);
+
+                    // Smoother Cubic Ease-In-Out transition for the movement
+                    const easeCubicInOut = moveProgress < 0.5 ? 4 * moveProgress * moveProgress * moveProgress : 1 - Math.pow(-2 * moveProgress + 2, 3) / 2;
                     
                     // Wireframe logic (align rotation smoothly, spin propeller)
                     introWireframeMesh.quaternion.slerpQuaternions(initialWireframeQuat, targetWireframeQuat, easeCubicInOut);
@@ -3115,24 +3199,16 @@ self.onmessage = function(e) {
                         introWireframeMesh.propeller.rotation.z += (0.3 + (me.speed * 0.5)) * timeScale;
                     }
 
-                    // Delay the materialization of the solid plane until the final 15% of the sequence
-                    let materialization = 0;
-                    if (progress > 0.85) {
-                        materialization = (progress - 0.85) / 0.15; // scales from 0.0 to 1.0
-                    }
-
-                    introWireframeMesh.traverse(child => {
-                        if (child.isMesh) {
-                            child.material.opacity = 0.35 * (1 - materialization);
-                        }
-                    });
+                    // Send shrink command to our custom shader (from 0.0 to 1.0)
+                    wireMat.uniforms.shrinkFactor.value = shrinkProgress;
+                    wireMat.uniforms.opacity.value = 0.35; // Ensure wireframe keeps its opacity natively
                     
-                    // Solid plane fade in logic
+                    // Apply solid plane fade in logic based exclusively on the fadeProgress timeline phase
                     me.mesh.children.forEach(c => {
                         if (c !== introWireframeMesh && c !== me.muzzleFlash) {
                             c.traverse(child => {
-                                if (child.isMesh && child.userData.origMat) {
-                                    child.material.opacity = materialization;
+                                if (child.isMesh) {
+                                    child.material.opacity = fadeProgress;
                                 }
                             });
                         }
@@ -3162,8 +3238,8 @@ self.onmessage = function(e) {
                     me.camera.lookAt(currentLookAt);
                     
                     // 2. Adjust for aspect ratio horizontal shift and scale mapping constraints
-                    const scale = 0.75 + (0.25 * easeCubicInOut);
-                    introWireframeMesh.scale.set(scale, scale, scale);
+                    const baseScale = 0.75 + (0.25 * easeCubicInOut);
+                    introWireframeMesh.scale.set(baseScale, baseScale, baseScale);
 
                     me.camera.fov = 45 + (15 * easeCubicInOut);
                     me.camera.updateProjectionMatrix();
