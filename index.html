@@ -750,7 +750,7 @@
         <div id="step-login" class="panel-box">
             <div class="lobby-title">BATTLE THUNDER</div>
             <div class="credit-text">Created by E-Money aka Breadmaster/MbappeFartBubble</div>
-            <input type="text" id="username" placeholder="ENTER USERNAME" maxlength="10">
+            <input type="text" id="username" placeholder="ENTER USERNAME" maxlength="12" onkeypress="if(event.key === 'Enter') goToMenu()">
             <button onclick="goToMenu()">ENTER HANGAR</button>
         </div>
 
@@ -768,7 +768,7 @@
             <div class="lobby-title">MISSION SELECT</div>
             <button onclick="hostGame()">HOST SQUADRON</button>
             <div class="menu-divider"><span>OR</span></div>
-            <input type="text" id="room-code-input" placeholder="ENTER ROOM CODE">
+            <input type="text" id="room-code-input" placeholder="ENTER ROOM CODE" maxlength="4" onkeypress="if(event.key === 'Enter') joinGame()">
             <button onclick="joinGame()">JOIN SQUADRON</button>
             
             <button onclick="goBackToLogin()" class="secondary-btn" style="margin-top: 40px;">BACK TO LOGIN</button>
@@ -869,9 +869,9 @@
             document.getElementById('ui-alert-text').innerText = msg;
             alertBox.style.display = 'block';
             
-            // reset animation
+            // reset animation with guaranteed reflow
             alertBox.style.animation = 'none';
-            alertBox.offsetHeight; 
+            void alertBox.offsetWidth; 
             alertBox.style.animation = 'dropDown 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards';
 
             if(alertTimeout) clearTimeout(alertTimeout);
@@ -1142,7 +1142,7 @@
                 const savedName = sessionStorage.getItem('username');
                 if (savedName) {
                     document.getElementById('username').value = savedName;
-                    hasConnectedOnce = true;
+                    // Do not artificially fake hasConnectedOnce. Let it correctly show the connecting UI!
                     goToMenu();
                 }
             }
@@ -1692,8 +1692,9 @@
 
         window.goToMenu = function () {
             const nameInput = document.getElementById('username');
-            if (!nameInput.value) { showUIAlert("NO USERNAME ENTERED"); return; }
-            myUsername = nameInput.value;
+            const usernameVal = nameInput.value.trim();
+            if (!usernameVal) { showUIAlert("NO USERNAME ENTERED"); return; }
+            myUsername = usernameVal;
 
             if (!hasConnectedOnce) {
                 document.getElementById('step-login').style.display = 'none';
@@ -1731,6 +1732,13 @@
                 socket.on('error_msg', (msg) => {
                     console.error('Server error:', msg);
                     showUIAlert(msg);
+                    
+                    // If we failed to join a room, cleanly kick the user back to the menu so they aren't trapped in the waiting screen
+                    if (document.getElementById('step-waiting').style.display === 'block' && netPlayers.length === 0) {
+                        document.getElementById('step-waiting').style.display = 'none';
+                        document.getElementById('step-menu').style.display = 'block';
+                        setUICameraView('menu');
+                    }
                 });
 
                 socket.on('player_joined', (p) => {
@@ -1864,8 +1872,12 @@
         };
 
         window.joinGame = function () {
-            const code = document.getElementById('room-code-input').value.toUpperCase();
-            if (!code) return;
+            const codeEl = document.getElementById('room-code-input');
+            const code = codeEl.value.trim().toUpperCase();
+            
+            if (!code) { showUIAlert("NO ROOM CODE ENTERED"); return; }
+            if (code.length !== 4) { showUIAlert("ROOM CODE MUST BE 4 CHARACTERS"); return; }
+            
             myRoomCode = code;
             isHost = false;
 
@@ -3301,9 +3313,11 @@ self.onmessage = function(e) {
                 _hudCache.hdg = degrees;
             }
 
-            if (me.isStalled !== _hudCache.stall) {
-                document.getElementById('stallWarn').style.display = me.isStalled ? 'block' : 'none';
-                _hudCache.stall = me.isStalled;
+            // Only show stall warning if we are actually alive and stalled
+            const showStall = me.isStalled && !me.isCrashed;
+            if (showStall !== _hudCache.stall) {
+                document.getElementById('stallWarn').style.display = showStall ? 'block' : 'none';
+                _hudCache.stall = showStall;
             }
 
             players.forEach(p => {
