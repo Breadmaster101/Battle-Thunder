@@ -1915,7 +1915,7 @@
             const codeEl = document.getElementById('room-code-input');
             const code = codeEl.value.trim().toUpperCase();
             
-            if (!code) { showUIAlert("NO ROOM CODE ENTERED"); return; }
+            if (!code) { showUIAlert("NO ROOM CODE ENTERED!"); return; }
             if (code.length !== 4) { showUIAlert("ROOM CODE MUST BE 4 CHARACTERS"); return; }
             
             // Set flag to wait for LOBBY_UPDATE confirmation before switching UI to avoid rubberbanding
