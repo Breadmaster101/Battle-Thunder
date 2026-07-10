@@ -89,6 +89,8 @@
         .panel-box > *:nth-child(4) { animation-delay: 0.35s; }
         .panel-box > *:nth-child(5) { animation-delay: 0.45s; }
         .panel-box > *:nth-child(6) { animation-delay: 0.55s; }
+        .panel-box > *:nth-child(7) { animation-delay: 0.65s; }
+        .panel-box > *:nth-child(8) { animation-delay: 0.75s; }
 
         @keyframes slideInLeft {
             0% { opacity: 0; transform: translateX(-40px); }
@@ -207,6 +209,24 @@
         }
         #lobby-overlay button:disabled:hover::after {
             opacity: 0;
+        }
+
+        /* ----- BACK & LEAVE BUTTON STYLES ----- */
+        .secondary-btn {
+            font-size: 0.9rem !important;
+            padding: 15px 20px !important;
+            color: rgba(255, 255, 255, 0.5) !important;
+            border-color: rgba(255, 255, 255, 0.15) !important;
+        }
+        .secondary-btn:hover {
+            color: #ffffff !important;
+            border-color: #ff4444 !important;
+        }
+        .secondary-btn::before {
+            background: #ff4444 !important;
+        }
+        .secondary-btn::after {
+            content: '✕' !important;
         }
 
         .menu-divider {
@@ -468,6 +488,33 @@
             z-index: 100;
         }
 
+        #quit-btn {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            background: rgba(0, 0, 0, 0.6);
+            color: rgba(255, 255, 255, 0.7);
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            padding: 12px 24px;
+            font-family: 'Inter', sans-serif;
+            font-size: 0.9rem;
+            font-weight: 600;
+            letter-spacing: 0.1em;
+            cursor: pointer;
+            z-index: 100;
+            display: none;
+            transition: all 0.3s ease;
+            text-transform: uppercase;
+            border-radius: 4px;
+            backdrop-filter: blur(4px);
+        }
+        #quit-btn:hover {
+            background: rgba(255, 68, 68, 0.8);
+            border-color: #ff4444;
+            color: #ffffff;
+            box-shadow: 0 0 10px rgba(255, 68, 68, 0.5);
+        }
+
         .crash-msg {
             display: none;
             position: absolute;
@@ -560,6 +607,8 @@
             <div class="menu-divider"><span>OR</span></div>
             <input type="text" id="room-code-input" placeholder="ENTER ROOM CODE">
             <button onclick="joinGame()">JOIN SQUADRON</button>
+            
+            <button onclick="goBackToLogin()" class="secondary-btn" style="margin-top: 40px;">BACK TO LOGIN</button>
         </div>
 
         <div id="step-waiting" class="panel-box" style="display:none;">
@@ -568,6 +617,8 @@
             <div id="player-list"></div>
             <button id="start-btn" onclick="startGame()" style="display:none;">LAUNCH MISSION</button>
             <div id="waiting-msg" class="waiting-text">WAITING FOR HOST TO LAUNCH...</div>
+            
+            <button onclick="leaveSquadron()" class="secondary-btn" style="margin-top: 40px;">LEAVE SQUADRON</button>
         </div>
     </div>
 
@@ -627,6 +678,8 @@
         [SPACE] Throttle Down<br>
         <b style="color:red">[F] FIRE WEAPON</b><br>
     </div>
+    
+    <button id="quit-btn" onclick="quitGame()">QUIT MISSION</button>
 
     <script type="importmap">
         {
@@ -1452,102 +1505,135 @@
             document.getElementById('step-connecting').style.display = 'block';
             setUICameraView('connecting');
 
-            socket = io(SOCKET_URL, {
-                reconnectionAttempts: Infinity,
-                reconnectionDelay: 1000,
-                timeout: 10000
-            });
+            if (!socket) {
+                socket = io(SOCKET_URL, {
+                    reconnectionAttempts: Infinity,
+                    reconnectionDelay: 1000,
+                    timeout: 10000
+                });
 
-            setTimeout(() => {
-                if (!socket.connected) {
-                    document.getElementById('connection-status').textContent = 'Server is starting up, please wait...';
-                }
-            }, 2000);
-
-            socket.on('connect', () => {
-                console.log("Connected to server");
-                document.getElementById('step-connecting').style.display = 'none';
-                document.getElementById('step-menu').style.display = 'block';
-                setUICameraView('menu');
-            });
-
-            socket.on('error_msg', (msg) => {
-                console.error('Server error:', msg);
-                alert(msg);
-            });
-
-            socket.on('player_joined', (p) => {
-                if (isHost) {
-                    const newIdx = netPlayers.length;
-                    netPlayers.push({ id: p.id, name: p.name, index: newIdx });
-                    updateLobbyUI();
-                    broadcastLobbyState();
-                }
-            });
-
-            socket.on('game_data', (packet) => {
-                if (packet.type === 'LOBBY_UPDATE') {
-                    netPlayers = packet.players;
-                    updateLobbyUI();
-                    if (!isHost) {
-                        const me = netPlayers.find(p => p.id === socket.id);
-                        if (me) myPlayerIndex = me.index;
+                setTimeout(() => {
+                    if (!socket.connected) {
+                        document.getElementById('connection-status').textContent = 'Server is starting up, please wait...';
                     }
-                } else if (packet.type === 'START_GAME') {
-                    document.getElementById('lobby-overlay').style.display = 'none';
-                    const uiContainer = document.getElementById('ui-3d-container');
-                    if (uiContainer) document.getElementById('bake-overlay').appendChild(uiContainer);
-                    
-                    document.getElementById('bake-overlay').style.display = 'flex';
-                    setUICameraView('loading');
+                }, 2000);
 
-                    setTimeout(() => {
-                        initGameWorld(netPlayers, myRoomCode);
-                    }, 100);
-                } else if (packet.type === 'GAME_STATE') {
-                    if (gameActive) handleGameState(packet);
-                } else if (packet.type === 'HIT_EVENT') {
-                    if (gameActive) {
-                        const target = players.find(p => p.index === packet.targetIdx);
-                        if (target && target.index === myPlayerIndex) {
-                            target.takeDamage(packet.dmg, packet.attackerIdx);
+                socket.on('connect', () => {
+                    console.log("Connected to server");
+                    document.getElementById('step-connecting').style.display = 'none';
+                    document.getElementById('step-menu').style.display = 'block';
+                    setUICameraView('menu');
+                });
+
+                socket.on('error_msg', (msg) => {
+                    console.error('Server error:', msg);
+                    alert(msg);
+                });
+
+                socket.on('player_joined', (p) => {
+                    if (isHost) {
+                        const newIdx = netPlayers.length;
+                        netPlayers.push({ id: p.id, name: p.name, index: newIdx });
+                        updateLobbyUI();
+                        broadcastLobbyState();
+                    }
+                });
+
+                socket.on('game_data', (packet) => {
+                    if (packet.type === 'LOBBY_UPDATE') {
+                        netPlayers = packet.players;
+                        updateLobbyUI();
+                        if (!isHost) {
+                            const me = netPlayers.find(p => p.id === socket.id);
+                            if (me) myPlayerIndex = me.index;
                         }
-                    }
-                }
-            });
+                    } else if (packet.type === 'START_GAME') {
+                        document.getElementById('lobby-overlay').style.display = 'none';
+                        const uiContainer = document.getElementById('ui-3d-container');
+                        if (uiContainer) document.getElementById('bake-overlay').appendChild(uiContainer);
+                        
+                        document.getElementById('bake-overlay').style.display = 'flex';
+                        setUICameraView('loading');
 
-            socket.on('player_data', (packet) => {
-                if (isHost && gameActive) {
-                    const p = players.find(pl => pl.index === packet.data.idx);
-
-                    if (packet.data.type === 'PLAYER_DIED') {
-                        const victim = p;
-                        if (victim) {
-                            victim.deaths++;
-                            if (packet.data.attackerIdx !== null && packet.data.attackerIdx !== -1) {
-                                const attacker = players.find(pa => pa.index === packet.data.attackerIdx);
-                                if (attacker && attacker.index !== victim.index) {
-                                    attacker.kills++;
-                                }
+                        setTimeout(() => {
+                            initGameWorld(netPlayers, myRoomCode);
+                        }, 100);
+                    } else if (packet.type === 'GAME_STATE') {
+                        if (gameActive) handleGameState(packet);
+                    } else if (packet.type === 'HIT_EVENT') {
+                        if (gameActive) {
+                            const target = players.find(p => p.index === packet.targetIdx);
+                            if (target && target.index === myPlayerIndex) {
+                                target.takeDamage(packet.dmg, packet.attackerIdx);
                             }
                         }
-                        return;
                     }
+                });
 
-                    if (packet.data.type === 'HIT_EVENT') {
-                        socket.emit('host_broadcast', { roomCode: myRoomCode, data: packet.data });
-                        if (packet.data.targetIdx === myPlayerIndex) {
-                            const localMe = players.find(pl => pl.index === myPlayerIndex);
-                            if (localMe) localMe.takeDamage(packet.data.dmg, packet.data.attackerIdx);
+                socket.on('player_data', (packet) => {
+                    if (isHost && gameActive) {
+                        const p = players.find(pl => pl.index === packet.data.idx);
+
+                        if (packet.data.type === 'PLAYER_DIED') {
+                            const victim = p;
+                            if (victim) {
+                                victim.deaths++;
+                                if (packet.data.attackerIdx !== null && packet.data.attackerIdx !== -1) {
+                                    const attacker = players.find(pa => pa.index === packet.data.attackerIdx);
+                                    if (attacker && attacker.index !== victim.index) {
+                                        attacker.kills++;
+                                    }
+                                }
+                            }
+                            return;
                         }
-                        return;
-                    }
 
-                    if (p) {
-                        p.syncData(packet.data);
+                        if (packet.data.type === 'HIT_EVENT') {
+                            socket.emit('host_broadcast', { roomCode: myRoomCode, data: packet.data });
+                            if (packet.data.targetIdx === myPlayerIndex) {
+                                const localMe = players.find(pl => pl.index === myPlayerIndex);
+                                if (localMe) localMe.takeDamage(packet.data.dmg, packet.data.attackerIdx);
+                            }
+                            return;
+                        }
+
+                        if (p) {
+                            p.syncData(packet.data);
+                        }
                     }
+                });
+            } else {
+                socket.connect();
+                if (socket.connected) {
+                    setTimeout(() => {
+                        document.getElementById('step-connecting').style.display = 'none';
+                        document.getElementById('step-menu').style.display = 'block';
+                        setUICameraView('menu');
+                    }, 500);
                 }
-            });
+            }
+        };
+
+        window.goBackToLogin = function() {
+            if (socket) socket.disconnect();
+            document.getElementById('step-menu').style.display = 'none';
+            document.getElementById('step-login').style.display = 'block';
+            setUICameraView('login');
+        };
+
+        window.leaveSquadron = function() {
+            if (socket) socket.disconnect();
+            document.getElementById('step-waiting').style.display = 'none';
+            document.getElementById('step-login').style.display = 'block';
+            setUICameraView('login');
+            isHost = false;
+            myRoomCode = "";
+            netPlayers = [];
+            players = [];
+        };
+
+        window.quitGame = function() {
+            window.location.reload();
         };
 
         window.hostGame = function () {
@@ -2887,10 +2973,16 @@ self.onmessage = function(e) {
             leaderboard.style.opacity = '0';
             leaderboard.style.transition = 'opacity 1.5s ease';
 
+            const quitBtn = document.getElementById('quit-btn');
+            quitBtn.style.display = 'block';
+            quitBtn.style.opacity = '0';
+            quitBtn.style.transition = 'opacity 1.5s ease';
+
             setTimeout(() => {
                 hud.style.opacity = '1';
                 controls.style.opacity = '1';
                 leaderboard.style.opacity = '1';
+                quitBtn.style.opacity = '1';
             }, 1000); 
 
             gameActive = true;
