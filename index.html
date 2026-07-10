@@ -6,6 +6,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Battle Thunder</title>
     <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    
+    <!-- Modern Font for Overlays -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;900&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@700;900&display=swap" rel="stylesheet">
+    
     <style>
         body {
             margin: 0;
@@ -18,113 +23,358 @@
             display: block;
         }
 
-        #lobby-overlay {
+        /* ----- MODERN UI OVERLAYS ----- */
+        #lobby-overlay, #bake-overlay {
             position: absolute;
             top: 0;
             left: 0;
             width: 100%;
             height: 100%;
-            background: radial-gradient(circle, #2a5a8a 0%, #102030 90%);
+            background: #050505;
+            background-image: 
+                radial-gradient(circle at 15% 50%, rgba(255, 255, 255, 0.04) 0%, transparent 50%),
+                radial-gradient(circle at 85% 30%, rgba(255, 255, 255, 0.02) 0%, transparent 50%);
             display: flex;
             flex-direction: column;
-            align-items: center;
+            align-items: flex-start;
             justify-content: center;
+            padding-left: 10vw;
+            box-sizing: border-box;
             z-index: 2000;
-            color: white;
+            color: #ffffff;
+            font-family: 'Inter', sans-serif;
+        }
+
+        #bake-overlay {
+            z-index: 3000;
+            display: none;
+            transition: opacity 1.5s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+
+        /* 3D Wireframe Plane Container */
+        #ui-3d-container {
+            position: absolute;
+            top: 0;
+            right: 0;
+            width: 70vw; /* Covers the right side */
+            height: 100%;
+            mask-image: linear-gradient(to right, transparent 0%, black 40%);
+            -webkit-mask-image: linear-gradient(to right, transparent 0%, black 40%);
+            z-index: 1;
+            pointer-events: none;
         }
 
         .panel-box {
-            background: rgba(0, 20, 0, 0.8);
-            border: 2px solid #00ff00;
-            padding: 30px;
-            border-radius: 10px;
-            box-shadow: 0 0 20px rgba(0, 255, 0, 0.2);
-            text-align: center;
-            max-width: 400px;
-            width: 90%;
-            backdrop-filter: blur(5px);
+            position: relative;
+            z-index: 10; /* Ensures UI is above the 3D container */
+            background: transparent;
+            border: none;
+            padding: 0;
+            box-shadow: none;
+            text-align: left;
+            max-width: 500px;
+            width: 100%;
+        }
+
+        /* Sequential staggered entrance animation */
+        .panel-box > * {
+            opacity: 0;
+            transform: translateX(-40px);
+            animation: slideInLeft 0.8s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+        }
+
+        .panel-box > *:nth-child(1) { animation-delay: 0.05s; }
+        .panel-box > *:nth-child(2) { animation-delay: 0.15s; }
+        .panel-box > *:nth-child(3) { animation-delay: 0.25s; }
+        .panel-box > *:nth-child(4) { animation-delay: 0.35s; }
+        .panel-box > *:nth-child(5) { animation-delay: 0.45s; }
+        .panel-box > *:nth-child(6) { animation-delay: 0.55s; }
+
+        @keyframes slideInLeft {
+            0% { opacity: 0; transform: translateX(-40px); }
+            100% { opacity: 1; transform: translateX(0); }
         }
 
         .lobby-title {
-            font-size: 32px;
-            color: #FFD700;
-            text-shadow: 0 0 10px #FFD700;
-            margin-bottom: 20px;
-            letter-spacing: 3px;
-            font-weight: bold;
+            font-family: 'Rajdhani', sans-serif;
+            letter-spacing: 0.05em;
+            font-size: clamp(3rem, 5vw, 5.5rem);
+            color: #ffffff;
+            margin-bottom: 2rem;
+            letter-spacing: -0.03em;
+            font-weight: 900;
+            line-height: 1;
+            text-transform: uppercase;
         }
 
-        input {
-            background: rgba(0, 0, 0, 0.5);
-            border: 1px solid #00ff00;
-            color: #00ff00;
-            padding: 10px;
-            font-family: 'Courier New', Courier, monospace;
-            font-size: 16px;
-            width: 80%;
-            margin-bottom: 15px;
+        #lobby-overlay input, #bake-overlay input {
+            background: transparent;
+            border: none;
+            border-bottom: 2px solid rgba(255, 255, 255, 0.15);
+            color: #ffffff;
+            padding: 15px 0;
+            font-family: 'Inter', sans-serif;
+            font-size: 1.2rem;
+            font-weight: 300;
+            width: 100%;
+            margin-bottom: 25px;
             outline: none;
-            text-align: center;
-        }
-
-        #room-code-input {
+            text-align: left;
+            transition: all 0.3s ease;
+            border-radius: 0;
             text-transform: uppercase;
         }
 
-        button {
-            background: #004400;
-            color: #00ff00;
-            border: 1px solid #00ff00;
-            padding: 10px 20px;
-            font-family: 'Courier New', Courier, monospace;
-            font-size: 18px;
+        #lobby-overlay input:focus, #bake-overlay input:focus {
+            border-bottom-color: #ffffff;
+            padding-left: 15px;
+        }
+
+        #lobby-overlay input::placeholder, #bake-overlay input::placeholder {
+            color: rgba(255, 255, 255, 0.2);
+        }
+
+        #lobby-overlay button, #bake-overlay button {
+            background: transparent;
+            color: #ffffff;
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            padding: 20px 30px;
+            font-family: 'Inter', sans-serif;
+            font-size: 1rem;
+            font-weight: 600;
+            letter-spacing: 0.15em;
             cursor: pointer;
-            margin: 5px;
-            transition: all 0.2s;
+            margin: 8px 0;
+            transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1);
             text-transform: uppercase;
-            font-weight: bold;
+            width: 100%;
+            text-align: left;
+            position: relative;
+            overflow: hidden;
+            border-radius: 0;
+            display: flex;
+            align-items: center;
+            z-index: 1;
         }
 
-        button:hover {
-            background: #00ff00;
-            color: black;
-            box-shadow: 0 0 15px #00ff00;
+        #lobby-overlay button::before, #bake-overlay button::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 0%;
+            height: 100%;
+            background: #ffffff;
+            transition: width 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+            z-index: -1;
         }
 
-        button:disabled {
-            background: #333;
-            border-color: #555;
-            color: #555;
+        #lobby-overlay button:hover::before, #bake-overlay button:hover::before {
+            width: 100%;
+        }
+
+        #lobby-overlay button:hover, #bake-overlay button:hover {
+            color: #000000;
+            padding-left: 40px;
+            border-color: #ffffff;
+        }
+
+        #lobby-overlay button::after, #bake-overlay button::after {
+            content: '→';
+            position: absolute;
+            right: 30px;
+            opacity: 0;
+            transform: translateX(-10px);
+            transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+
+        #lobby-overlay button:hover::after, #bake-overlay button:hover::after {
+            opacity: 1;
+            transform: translateX(0);
+        }
+
+        #lobby-overlay button:disabled {
+            border-color: rgba(255, 255, 255, 0.05);
+            color: rgba(255, 255, 255, 0.2);
             cursor: not-allowed;
-            box-shadow: none;
+        }
+        
+        #lobby-overlay button:disabled:hover {
+            padding-left: 30px;
+        }
+        #lobby-overlay button:disabled:hover::before {
+            width: 0%;
+        }
+        #lobby-overlay button:disabled:hover::after {
+            opacity: 0;
+        }
+
+        .menu-divider {
+            display: flex;
+            align-items: center;
+            text-align: center;
+            color: rgba(255, 255, 255, 0.2);
+            font-size: 0.8rem;
+            font-weight: 600;
+            letter-spacing: 0.2em;
+            margin: 25px 0;
+        }
+
+        .menu-divider::before, .menu-divider::after {
+            content: '';
+            flex: 1;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .menu-divider::before { margin-right: 15px; }
+        .menu-divider::after { margin-left: 15px; }
+
+        .status-text {
+            color: rgba(255, 255, 255, 0.5);
+            font-size: 1rem;
+            margin: 15px 0;
+            font-weight: 300;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+        }
+
+        .loader-track {
+            width: 100%;
+            height: 1px;
+            background: rgba(255, 255, 255, 0.1);
+            position: relative;
+            overflow: hidden;
+            margin: 30px 0;
+        }
+
+        .loader-bar {
+            position: absolute;
+            top: 0;
+            left: 0;
+            height: 100%;
+            width: 30%;
+            background: #ffffff;
+            animation: modernLoad 1.5s cubic-bezier(0.65, 0, 0.35, 1) infinite;
+        }
+
+        @keyframes modernLoad {
+            0% { left: -30%; right: 100%; }
+            50% { left: 30%; right: 30%; width: 40%; }
+            100% { left: 100%; right: -30%; }
+        }
+
+        .room-code-display {
+            font-size: 1rem;
+            color: rgba(255,255,255,0.5);
+            margin-bottom: 30px;
+            letter-spacing: 0.1em;
+            font-weight: 600;
+        }
+
+        .highlight-text {
+            color: #000000;
+            background: #ffffff;
+            padding: 4px 10px;
+            margin-left: 10px;
+            font-weight: 900;
+            letter-spacing: 0.15em;
         }
 
         #player-list {
             text-align: left;
-            margin: 20px 0;
-            min-height: 100px;
-            border: 1px solid rgba(255, 255, 255, 0.2);
-            padding: 10px;
-            background: rgba(0, 0, 0, 0.3);
+            margin: 0 0 30px 0;
+            min-height: 150px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            padding: 0;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 0;
+            overflow: hidden;
         }
 
         .player-row {
-            padding: 5px;
-            border-bottom: 1px dashed rgba(0, 255, 0, 0.3);
+            padding: 15px 20px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+            font-weight: 400;
+            font-size: 1rem;
+            color: rgba(255,255,255,0.6);
+            transition: background 0.2s;
+            position: relative;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+        
+        .player-row:last-child {
+            border-bottom: none;
+        }
+
+        .player-row[style*="color: rgb(0, 255, 0)"],
+        .player-row[style*="color: #00ff00"],
+        .player-row[style*="color: #00FF00"] {
+            color: #ffffff !important;
+            background: rgba(255, 255, 255, 0.05);
+            font-weight: 600;
+        }
+        
+        .player-row[style*="color: rgb(0, 255, 0)"]::before,
+        .player-row[style*="color: #00ff00"]::before,
+        .player-row[style*="color: #00FF00"]::before {
+            content: '';
+            position: absolute;
+            left: 0;
+            top: 0;
+            bottom: 0;
+            width: 3px;
+            background: #ffffff;
+        }
+
+        /* Swatch and Host indicators */
+        .player-swatch {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            margin-right: 12px;
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            flex-shrink: 0;
+        }
+
+        .host-indicator {
+            color: #FFD700;
+            margin-left: 10px;
+            font-size: 0.8rem;
+            letter-spacing: 0.1em;
+            font-weight: 900;
         }
 
         .waiting-text {
-            color: #aaa;
-            font-size: 14px;
-            margin-top: 10px;
-            animation: blink 1.5s infinite;
+            color: rgba(255, 255, 255, 0.4);
+            font-size: 0.85rem;
+            font-weight: 600;
+            letter-spacing: 0.15em;
+            margin-top: 25px;
+            text-transform: uppercase;
+            animation: pulseText 2s infinite;
         }
 
-        @keyframes blink {
-            50% {
-                opacity: 0.3;
-            }
+        @keyframes pulseText {
+            0%, 100% { opacity: 0.4; }
+            50% { opacity: 0.8; }
         }
+
+        #start-btn {
+            border-color: #ffffff;
+            color: #000000;
+        }
+        #start-btn::before {
+            width: 100%;
+            background: #ffffff;
+        }
+        #start-btn:hover {
+            color: #ffffff;
+        }
+        #start-btn:hover::before {
+            width: 0%;
+        }
+        /* ----- END MODERN UI OVERLAYS ----- */
 
         .hud-container {
             position: absolute;
@@ -281,86 +531,42 @@
             border: 1px solid rgba(255, 255, 255, 0.4);
             vertical-align: middle;
         }
-
-        #bake-overlay {
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background: radial-gradient(circle, #2a5a8a 0%, #102030 90%);
-            z-index: 3000;
-            display: none;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-        }
-
-        .loader-track {
-            width: 300px;
-            height: 2px;
-            background: #222;
-            position: relative;
-            overflow: hidden;
-        }
-
-        .loader-bar {
-            position: absolute;
-            top: 0;
-            left: 0;
-            height: 100%;
-            width: 100%;
-            background: #00ff00;
-            box-shadow: 0 0 15px #00ff00;
-            animation: load 2s infinite;
-        }
-
-        @keyframes load {
-            0% {
-                transform: translateX(-100%);
-            }
-
-            100% {
-                transform: translateX(100%);
-            }
-        }
     </style>
 </head>
 
 <body>
 
     <div id="lobby-overlay">
+        <div id="ui-3d-container"></div>
         <div id="step-login" class="panel-box">
             <div class="lobby-title">BATTLE THUNDER</div>
             <input type="text" id="username" placeholder="PILOT CALLSIGN" maxlength="10">
-            <br>
             <button onclick="goToMenu()">ENTER HANGAR</button>
         </div>
 
         <div id="step-connecting" class="panel-box" style="display:none;">
             <div class="lobby-title">CONNECTING</div>
-            <div style="color: #00ff00; font-size: 18px; margin: 20px 0;">
+            <div class="status-text">
                 <span id="connection-status">Connecting to server...</span>
             </div>
-            <div class="loader-track" style="margin: 20px auto;">
-                <div class="loader-bar" style="animation-duration: 1.5s;"></div>
+            <div class="loader-track">
+                <div class="loader-bar"></div>
             </div>
         </div>
 
         <div id="step-menu" class="panel-box" style="display:none;">
             <div class="lobby-title">MISSION SELECT</div>
-            <button onclick="hostGame()" style="width: 100%;">HOST SQUADRON</button>
-            <br><br>
-            <div style="border-top: 1px solid #444; margin: 10px 0;"></div>
+            <button onclick="hostGame()">HOST SQUADRON</button>
+            <div class="menu-divider"><span>OR</span></div>
             <input type="text" id="room-code-input" placeholder="ENTER ROOM CODE">
-            <button onclick="joinGame()" style="width: 100%;">JOIN SQUADRON</button>
+            <button onclick="joinGame()">JOIN SQUADRON</button>
         </div>
 
         <div id="step-waiting" class="panel-box" style="display:none;">
-            <div class="lobby-title">ROOM CODE: <span id="display-room-code" style="color:white">----</span></div>
+            <div class="lobby-title">SQUADRON</div>
+            <div class="room-code-display">ROOM CODE: <span id="display-room-code" class="highlight-text">----</span></div>
             <div id="player-list"></div>
-            <button id="start-btn" onclick="startGame()"
-                style="display:none; width: 100%; color: yellow; border-color: yellow;">LAUNCH MISSION</button>
+            <button id="start-btn" onclick="startGame()" style="display:none;">LAUNCH MISSION</button>
             <div id="waiting-msg" class="waiting-text">WAITING FOR HOST TO LAUNCH...</div>
         </div>
     </div>
@@ -368,11 +574,11 @@
     <div id="bake-overlay">
         <div class="panel-box">
             <div class="lobby-title">DEPLOYING</div>
-            <div style="color: #00ff00; font-size: 18px; margin: 20px 0;">
+            <div class="status-text">
                 GENERATING WORLD...
             </div>
-            <div class="loader-track" style="margin: 20px auto;">
-                <div class="loader-bar" style="animation-duration: 1.0s;"></div>
+            <div class="loader-track">
+                <div class="loader-bar"></div>
             </div>
         </div>
     </div>
@@ -436,6 +642,190 @@
         import { SimplexNoise } from 'three/addons/math/SimplexNoise.js';
         import * as BufferGeometryUtils from 'three/addons/utils/BufferGeometryUtils.js';
         import { CSM } from 'three/addons/csm/CSM.js';
+
+        // --- UI 3D WIREFRAME PLANE SYSTEM ---
+        let uiScene, uiCamera, uiRenderer, uiPlane;
+        let uiActive = true;
+        let uiTargetCamPos = new THREE.Vector3(14, 5, -14);
+        let uiTargetLookAt = new THREE.Vector3(0, 0, 0);
+        let uiCurrentLookAt = new THREE.Vector3(0, 0, 0);
+
+        function initUI3D() {
+            const container = document.getElementById('ui-3d-container');
+            uiScene = new THREE.Scene();
+            
+            uiCamera = new THREE.PerspectiveCamera(45, (window.innerWidth * 0.7) / window.innerHeight, 0.1, 1000);
+            uiCamera.position.copy(uiTargetCamPos);
+
+            uiRenderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
+            uiRenderer.setSize(window.innerWidth * 0.7, window.innerHeight);
+            uiRenderer.setPixelRatio(window.devicePixelRatio);
+            container.appendChild(uiRenderer.domElement);
+
+            const wireMat = new THREE.MeshBasicMaterial({
+                color: 0xaaaaaa,
+                wireframe: true,
+                transparent: true,
+                opacity: 0.35
+            });
+
+            uiPlane = new THREE.Group();
+
+            const bodyGeo = new THREE.CylinderGeometry(1.1, 0.9, 7, 10);
+            bodyGeo.rotateX(Math.PI / 2);
+            uiPlane.add(new THREE.Mesh(bodyGeo, wireMat));
+
+            const noseGeo = new THREE.CylinderGeometry(0.9, 0.8, 3.5, 10);
+            noseGeo.rotateX(Math.PI / 2);
+            noseGeo.translate(0, 0, -5.25);
+            uiPlane.add(new THREE.Mesh(noseGeo, wireMat));
+
+            const spinnerGeo = new THREE.CylinderGeometry(0.8, 0.1, 2, 10);
+            spinnerGeo.rotateX(Math.PI / 2);
+            spinnerGeo.translate(0, 0, -8);
+            uiPlane.add(new THREE.Mesh(spinnerGeo, wireMat));
+
+            const tailBoomGeo = new THREE.CylinderGeometry(0.4, 1.1, 6, 10);
+            tailBoomGeo.rotateX(Math.PI / 2);
+            tailBoomGeo.translate(0, 0, 6.5);
+            uiPlane.add(new THREE.Mesh(tailBoomGeo, wireMat));
+
+            const cockpitGeo = new THREE.SphereGeometry(1.1, 8, 8);
+            cockpitGeo.scale(1, 0.8, 2.5);
+            cockpitGeo.translate(0, 0.8, -0.5);
+            uiPlane.add(new THREE.Mesh(cockpitGeo, wireMat));
+
+            const wGeo = new THREE.BoxGeometry(7, 0.2, 3);
+            wGeo.translate(3.5, 0, 0.5);
+            
+            const leftWing = new THREE.Mesh(wGeo, wireMat);
+            leftWing.position.set(0.8, -0.2, -1);
+            leftWing.rotation.x = -0.05;
+            leftWing.rotation.y = -0.2;
+            uiPlane.add(leftWing);
+
+            const wTipGeo = new THREE.BoxGeometry(0.5, 0.21, 3);
+            wTipGeo.translate(7.25, 0, 0.5);
+            const leftTip = new THREE.Mesh(wTipGeo, wireMat);
+            leftTip.position.set(0.8, -0.2, -1);
+            leftTip.rotation.x = -0.05;
+            leftTip.rotation.y = -0.2;
+            uiPlane.add(leftTip);
+
+            const rightWing = new THREE.Mesh(wGeo, wireMat);
+            rightWing.position.set(-0.8, -0.2, -1);
+            rightWing.rotation.x = -0.05;
+            rightWing.rotation.y = 0.2;
+            rightWing.scale.x = -1;
+            uiPlane.add(rightWing);
+
+            const rightTip = new THREE.Mesh(wTipGeo, wireMat);
+            rightTip.position.set(-0.8, -0.2, -1);
+            rightTip.rotation.x = -0.05;
+            rightTip.rotation.y = 0.2;
+            rightTip.scale.x = -1;
+            uiPlane.add(rightTip);
+
+            const hStabGeo = new THREE.BoxGeometry(5, 0.15, 2);
+            hStabGeo.translate(0, 0, 1);
+            const hStab = new THREE.Mesh(hStabGeo, wireMat);
+            hStab.position.set(0, 0.28, 8.5);
+            uiPlane.add(hStab);
+
+            const vStabGeo = new THREE.BoxGeometry(0.2, 3, 2.5);
+            const pos = vStabGeo.attributes.position;
+            for (let i = 0; i < pos.count; i++) {
+                const y = pos.getY(i);
+                if (y > 0) pos.setZ(i, pos.getZ(i) + 1.5);
+            }
+            vStabGeo.computeVertexNormals();
+
+            const vStab = new THREE.Mesh(vStabGeo, wireMat);
+            vStab.position.set(0, 2.0, 8.5);
+            uiPlane.add(vStab);
+
+            const scoopGeo = new THREE.BoxGeometry(1.2, 0.6, 3);
+            scoopGeo.translate(0, -0.3, 0);
+            const scoop = new THREE.Mesh(scoopGeo, wireMat);
+            scoop.position.set(0, -0.9, 1);
+            uiPlane.add(scoop);
+
+            const propeller = new THREE.Group();
+            const bladeGeo = new THREE.BoxGeometry(0.18, 3.6, 0.2);
+            bladeGeo.translate(0, 1.8, 0);
+            for (let i = 0; i < 3; i++) {
+                const blade = new THREE.Mesh(bladeGeo, wireMat);
+                blade.rotation.z = (i / 3) * Math.PI * 2;
+                propeller.add(blade);
+            }
+            propeller.position.set(0, 0, -9.1);
+            uiPlane.add(propeller);
+            uiPlane.propeller = propeller;
+
+            uiPlane.scale.set(0.75, 0.75, 0.75); // Makes it smaller
+
+            uiScene.add(uiPlane);
+            uiAnimate();
+        }
+
+        function setUICameraView(view) {
+            switch(view) {
+                case 'login':
+                    uiTargetCamPos.set(14, 5, -14); 
+                    uiTargetLookAt.set(0, 0, 0);
+                    break;
+                case 'connecting':
+                    uiTargetCamPos.set(0, -3, -18); 
+                    uiTargetLookAt.set(0, 0, 0);
+                    break;
+                case 'menu':
+                    uiTargetCamPos.set(12, 14, 12); 
+                    uiTargetLookAt.set(0, 0, 0);
+                    break;
+                case 'waiting':
+                    uiTargetCamPos.set(0, 3, 20); 
+                    uiTargetLookAt.set(0, 0, 0);
+                    break;
+                case 'loading':
+                    uiTargetCamPos.set(-10, 7, -8); 
+                    uiTargetLookAt.set(0, 0, 0);
+                    break;
+            }
+        }
+
+        function uiAnimate() {
+            if (!uiActive) return;
+            requestAnimationFrame(uiAnimate);
+
+            const time = Date.now() * 0.001;
+            uiPlane.rotation.y += 0.005;
+            uiPlane.rotation.z = Math.sin(time * 1.5) * 0.1;
+            uiPlane.rotation.x = Math.cos(time * 1.2) * 0.05;
+
+            if (uiPlane.propeller) {
+                uiPlane.propeller.rotation.z += 0.3;
+            }
+
+            uiCamera.position.lerp(uiTargetCamPos, 0.05);
+            uiCurrentLookAt.lerp(uiTargetLookAt, 0.05);
+            uiCamera.lookAt(uiCurrentLookAt);
+
+            // Shift camera left locally to push the plane to the right side of the screen.
+            // This preserves the exact horizontal position it had on the SQUADRON screen 
+            // without causing any unwanted parallax sliding when the camera angle changes.
+            const origPos = uiCamera.position.clone();
+            uiCamera.translateX(-2.4);
+
+            uiRenderer.render(uiScene, uiCamera);
+
+            // Restore the true camera position so the lerping math remains stable for the next frame
+            uiCamera.position.copy(origPos);
+        }
+
+        // Initialize UI 3D Canvas
+        initUI3D();
+        setUICameraView('login');
+        // --- END UI 3D WIREFRAME PLANE SYSTEM ---
 
         const CONFIG = {
             width: 14000,
@@ -990,6 +1380,7 @@
 
             document.getElementById('step-login').style.display = 'none';
             document.getElementById('step-connecting').style.display = 'block';
+            setUICameraView('connecting');
 
             socket = io(SOCKET_URL, {
                 reconnectionAttempts: Infinity,
@@ -1007,6 +1398,7 @@
                 console.log("Connected to server");
                 document.getElementById('step-connecting').style.display = 'none';
                 document.getElementById('step-menu').style.display = 'block';
+                setUICameraView('menu');
             });
 
             socket.on('error_msg', (msg) => {
@@ -1033,7 +1425,11 @@
                     }
                 } else if (packet.type === 'START_GAME') {
                     document.getElementById('lobby-overlay').style.display = 'none';
+                    const uiContainer = document.getElementById('ui-3d-container');
+                    if (uiContainer) document.getElementById('bake-overlay').appendChild(uiContainer);
+                    
                     document.getElementById('bake-overlay').style.display = 'flex';
+                    setUICameraView('loading');
 
                     setTimeout(() => {
                         initGameWorld(netPlayers, myRoomCode);
@@ -1099,6 +1495,7 @@
             document.getElementById('start-btn').style.display = 'block';
             document.getElementById('waiting-msg').style.display = 'none';
             updateLobbyUI();
+            setUICameraView('waiting');
         };
 
         window.joinGame = function () {
@@ -1112,12 +1509,18 @@
             document.getElementById('step-menu').style.display = 'none';
             document.getElementById('step-waiting').style.display = 'block';
             document.getElementById('display-room-code').innerText = code;
+            setUICameraView('waiting');
         };
 
         window.startGame = function () {
             if (!isHost) return;
             document.getElementById('lobby-overlay').style.display = 'none';
+            
+            const uiContainer = document.getElementById('ui-3d-container');
+            if (uiContainer) document.getElementById('bake-overlay').appendChild(uiContainer);
+            
             document.getElementById('bake-overlay').style.display = 'flex';
+            setUICameraView('loading');
 
             socket.emit('host_broadcast', { roomCode: myRoomCode, data: { type: 'START_GAME' } });
 
@@ -1129,11 +1532,34 @@
         function updateLobbyUI() {
             const list = document.getElementById('player-list');
             list.innerHTML = "";
+            const planePaletteColors = [
+                '#FF0000', '#00FF00', '#FFFF00', '#FF00FF', '#FF8C00', 
+                '#FFFFFF', '#7CFC00', '#DC143C', '#FF1493', '#FF4500'
+            ];
             netPlayers.forEach(p => {
                 const div = document.createElement('div');
                 div.className = 'player-row';
-                div.innerText = `[${p.index + 1}] ${p.name}`;
-                if (p.id === socket.id) div.style.color = "#00ff00";
+                div.style.display = 'flex';
+                div.style.alignItems = 'center';
+                
+                const colorHex = planePaletteColors[p.index % planePaletteColors.length];
+                const swatch = document.createElement('span');
+                swatch.className = 'player-swatch';
+                swatch.style.backgroundColor = colorHex;
+                div.appendChild(swatch);
+                
+                const nameSpan = document.createElement('span');
+                nameSpan.innerText = `[${p.index + 1}] ${p.name}`;
+                div.appendChild(nameSpan);
+                
+                if (p.index === 0) {
+                    const hostIcon = document.createElement('span');
+                    hostIcon.className = 'host-indicator';
+                    hostIcon.innerText = '★ HOST';
+                    div.appendChild(hostIcon);
+                }
+                
+                if (p.id === socket.id) div.style.color = "#00ff00"; 
                 list.appendChild(div);
             });
         }
@@ -2188,7 +2614,21 @@
 
             renderer.compile(scene, me.camera);
 
-            document.getElementById('bake-overlay').style.display = 'none';
+            // Smooth fade out of the UI
+            const bakeOverlay = document.getElementById('bake-overlay');
+            bakeOverlay.style.opacity = '0';
+            bakeOverlay.style.pointerEvents = 'none';
+
+            setTimeout(() => {
+                bakeOverlay.style.display = 'none';
+                bakeOverlay.style.opacity = '1'; // Reset just in case it's shown again
+                bakeOverlay.style.pointerEvents = 'auto';
+
+                uiActive = false; // Disable the UI 3D wireframe animation after fade
+                const uiContainer = document.getElementById('ui-3d-container');
+                if(uiContainer) uiContainer.style.display = 'none';
+            }, 1500);
+
             gameActive = true;
             document.getElementById('hud-main').style.display = 'flex';
             document.getElementById('controls').style.display = 'block';
@@ -2523,7 +2963,16 @@
         function onWindowResize() {
             const width = window.innerWidth;
             const height = window.innerHeight;
-            renderer.setSize(width, height);
+            
+            if (renderer) {
+                renderer.setSize(width, height);
+            }
+
+            if (uiRenderer && uiActive) {
+                uiCamera.aspect = (width * 0.7) / height;
+                uiCamera.updateProjectionMatrix();
+                uiRenderer.setSize(width * 0.7, height);
+            }
 
             const me = players.find(p => p.index === myPlayerIndex);
             if (me) {
