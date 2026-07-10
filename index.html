@@ -51,6 +51,33 @@
             transition: opacity 0.5s ease-out;
         }
 
+        /* Custom In-App Notification Modal */
+        #ui-alert {
+            display: none;
+            position: absolute;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(5, 5, 5, 0.85);
+            border: 1px solid #ff4444;
+            color: #ff4444;
+            padding: 15px 30px;
+            font-family: 'Inter', sans-serif;
+            font-weight: 600;
+            font-size: 0.9rem;
+            letter-spacing: 0.15em;
+            z-index: 5000;
+            backdrop-filter: blur(8px);
+            text-transform: uppercase;
+            box-shadow: 0 0 15px rgba(255, 68, 68, 0.2);
+            animation: dropDown 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+        }
+
+        @keyframes dropDown {
+            0% { top: -50px; opacity: 0; }
+            100% { top: 20px; opacity: 1; }
+        }
+
         /* 3D Wireframe Plane Container */
         #ui-3d-container {
             position: absolute;
@@ -109,6 +136,16 @@
             text-transform: uppercase;
         }
 
+        .credit-text {
+            font-size: 0.8rem;
+            color: rgba(255, 255, 255, 0.4);
+            margin-top: -15px;
+            margin-bottom: 25px;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+            font-weight: 600;
+        }
+
         #lobby-overlay input, #bake-overlay input {
             background: transparent;
             border: none;
@@ -124,12 +161,14 @@
             text-align: left;
             transition: all 0.3s ease;
             border-radius: 0;
+        }
+        
+        #room-code-input {
             text-transform: uppercase;
         }
 
         #lobby-overlay input:focus, #bake-overlay input:focus {
             border-bottom-color: #ffffff;
-            padding-left: 15px;
         }
 
         #lobby-overlay input::placeholder, #bake-overlay input::placeholder {
@@ -177,7 +216,6 @@
 
         #lobby-overlay button:hover {
             color: #000000;
-            padding-left: 40px;
             border-color: #ffffff;
         }
 
@@ -186,13 +224,11 @@
             position: absolute;
             right: 30px;
             opacity: 0;
-            transform: translateX(-10px);
             transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1);
         }
 
         #lobby-overlay button:hover::after, #bake-overlay button:hover::after {
             opacity: 1;
-            transform: translateX(0);
         }
 
         #lobby-overlay button:disabled {
@@ -201,9 +237,6 @@
             cursor: not-allowed;
         }
         
-        #lobby-overlay button:disabled:hover {
-            padding-left: 30px;
-        }
         #lobby-overlay button:disabled:hover::before {
             width: 0%;
         }
@@ -319,7 +352,6 @@
             color: rgba(255,255,255,0.6);
             transition: background 0.2s;
             position: relative;
-            text-transform: uppercase;
             letter-spacing: 0.05em;
         }
         
@@ -396,6 +428,7 @@
         }
         /* ----- END MODERN UI OVERLAYS ----- */
 
+        /* ----- IN-GAME UI OVERHAUL ----- */
         .hud-container {
             position: absolute;
             top: 20px;
@@ -406,46 +439,80 @@
         }
 
         .hud-box {
-            color: white;
-            text-shadow: 2px 2px 0px #000;
-            background: rgba(0, 0, 0, 0.4);
+            color: #ffffff;
+            background: rgba(5, 5, 5, 0.6);
             padding: 20px;
-            border-radius: 8px;
-            border: 2px solid rgba(255, 255, 255, 0.3);
-            backdrop-filter: blur(4px);
-            width: 220px;
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            backdrop-filter: blur(8px);
+            width: 260px;
+            font-family: 'Inter', sans-serif;
+            box-sizing: border-box;
         }
 
-        h1 {
-            margin: 0;
-            font-size: 22px;
-            color: #FFD700;
-            margin-bottom: 10px;
-            letter-spacing: 2px;
+        #hud-name {
+            margin: 0 0 15px 0;
+            font-family: 'Rajdhani', sans-serif;
+            font-size: 2rem;
+            color: #ffffff;
+            letter-spacing: 0.05em;
+            font-weight: 700;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.15);
+            padding-bottom: 10px;
         }
 
-        .stat {
-            font-size: 16px;
-            margin-top: 5px;
-            font-weight: bold;
+        .stat-row {
+            display: flex;
+            justify-content: space-between;
+            font-size: 0.85rem;
+            margin-top: 10px;
+            font-weight: 400;
+            letter-spacing: 0.15em;
+            color: rgba(255, 255, 255, 0.5);
+            text-transform: uppercase;
+        }
+
+        .stat-row span.stat-val {
+            font-weight: 600;
+            color: #ffffff;
+        }
+
+        .stat-row.health-row span.stat-val {
+            color: #ff4444;
+        }
+
+        #stallWarn {
+            margin-top: 15px;
+            background: rgba(255, 68, 68, 0.15);
+            border: 1px solid #ff4444;
+            color: #ff4444;
+            text-align: center;
+            padding: 8px 0;
+            font-weight: 900;
+            letter-spacing: 0.2em;
+            font-size: 0.9rem;
+            animation: blink 0.5s infinite alternate;
+            text-transform: uppercase;
+        }
+
+        @keyframes blink {
+            from { opacity: 1; }
+            to { opacity: 0.3; }
         }
 
         .radar {
             width: 140px;
             height: 140px;
-            margin-top: 15px;
+            margin: 25px auto 5px auto;
             border-radius: 50%;
-            border: 2px solid rgba(255, 255, 255, 0.4);
-            background: rgba(0, 20, 0, 0.6);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            background: rgba(0, 0, 0, 0.5);
             background-image:
-                radial-gradient(transparent 30%, rgba(0, 255, 0, 0.3) 31%, transparent 32%),
-                linear-gradient(0deg, transparent 49%, rgba(0, 255, 0, 0.3) 50%, transparent 51%),
-                linear-gradient(90deg, transparent 49%, rgba(0, 255, 0, 0.3) 50%, transparent 51%);
+                radial-gradient(transparent 30%, rgba(255, 255, 255, 0.1) 31%, transparent 32%),
+                radial-gradient(transparent 60%, rgba(255, 255, 255, 0.1) 61%, transparent 62%),
+                linear-gradient(0deg, transparent 49%, rgba(255, 255, 255, 0.1) 50%, transparent 51%),
+                linear-gradient(90deg, transparent 49%, rgba(255, 255, 255, 0.1) 50%, transparent 51%);
             position: relative;
-            box-shadow: 0 0 10px rgba(0, 0, 0, 0.5);
             overflow: hidden;
-            margin-left: auto;
-            margin-right: auto;
         }
 
         .radar-center {
@@ -454,98 +521,162 @@
             left: 50%;
             width: 4px;
             height: 4px;
-            background: #FFD700;
+            background: #ffffff;
             border-radius: 50%;
             transform: translate(-50%, -50%);
-            box-shadow: 0 0 4px #FFD700;
+            box-shadow: 0 0 6px #ffffff;
         }
 
         .radar-blip {
             position: absolute;
             top: 0;
             left: 0;
-            width: 8px;
-            height: 8px;
-            background: #ff3333;
+            width: 6px;
+            height: 6px;
+            background: #ff4444;
             border-radius: 50%;
             transform: translate(-50%, -50%);
-            box-shadow: 0 0 5px red;
+            box-shadow: 0 0 5px #ff4444;
         }
 
         #controls {
             position: absolute;
             bottom: 20px;
             right: 20px;
-            color: rgba(255, 255, 255, 0.8);
-            text-shadow: 1px 1px 2px black;
-            font-size: 12px;
+            background: rgba(5, 5, 5, 0.6);
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            backdrop-filter: blur(8px);
+            padding: 15px 20px;
+            color: rgba(255, 255, 255, 0.5);
+            font-family: 'Inter', sans-serif;
+            font-size: 0.75rem;
+            font-weight: 400;
+            letter-spacing: 0.15em;
             pointer-events: none;
-            background: rgba(0, 0, 0, 0.6);
-            padding: 15px;
-            border-radius: 4px;
-            text-align: right;
             display: none;
             z-index: 100;
+            line-height: 1.8;
+            text-align: right;
+            box-sizing: border-box;
+        }
+
+        #controls b {
+            font-family: 'Rajdhani', sans-serif;
+            color: #ffffff;
+            font-size: 1.1rem;
+            letter-spacing: 0.1em;
+            display: block;
+            margin-bottom: 8px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.15);
+            padding-bottom: 5px;
+            font-weight: 700;
+        }
+
+        #controls .highlight-key {
+            color: #ffffff;
+            font-weight: 600;
+        }
+
+        #controls .action-fire {
+            color: #ff4444;
+            font-weight: 600;
         }
 
         #quit-btn {
             position: absolute;
             bottom: 20px;
             left: 20px;
-            background: rgba(0, 0, 0, 0.6);
-            color: rgba(255, 255, 255, 0.7);
-            border: 1px solid rgba(255, 255, 255, 0.3);
-            padding: 12px 24px;
+            background: rgba(5, 5, 5, 0.6);
+            color: rgba(255, 255, 255, 0.5);
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            padding: 15px 20px;
             font-family: 'Inter', sans-serif;
             font-size: 0.9rem;
             font-weight: 600;
-            letter-spacing: 0.1em;
+            letter-spacing: 0.15em;
             cursor: pointer;
             z-index: 100;
             display: none;
-            transition: all 0.3s ease;
+            transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1);
             text-transform: uppercase;
-            border-radius: 4px;
-            backdrop-filter: blur(4px);
+            backdrop-filter: blur(8px);
+            border-radius: 0;
+            overflow: hidden;
         }
+
+        #quit-btn::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 0%;
+            height: 100%;
+            background: #ff4444;
+            transition: width 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+            z-index: -1;
+        }
+
+        #quit-btn:hover::before {
+            width: 100%;
+        }
+
         #quit-btn:hover {
-            background: rgba(255, 68, 68, 0.8);
-            border-color: #ff4444;
             color: #ffffff;
-            box-shadow: 0 0 10px rgba(255, 68, 68, 0.5);
+            border-color: #ff4444;
         }
 
         .crash-msg {
             display: none;
             position: absolute;
             top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
-            color: red;
-            font-size: 40px;
-            font-weight: bold;
-            text-shadow: 2px 2px 10px black;
-            background: rgba(0, 0, 0, 0.9);
-            padding: 40px;
-            border: 4px solid red;
+            left: 0;
+            width: 100%;
+            transform: translateY(-50%);
+            background: rgba(5, 5, 5, 0.85);
+            backdrop-filter: blur(12px);
+            padding: 50px 0;
             text-align: center;
             z-index: 3000;
+            border-top: 1px solid rgba(255, 68, 68, 0.3);
+            border-bottom: 1px solid rgba(255, 68, 68, 0.3);
+        }
+
+        #death-reason {
+            font-family: 'Rajdhani', sans-serif;
+            font-size: clamp(2.5rem, 4vw, 4.5rem);
+            color: #ff4444;
+            font-weight: 900;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+            margin-bottom: 15px;
+            line-height: 1;
+        }
+
+        #respawn-text {
+            font-family: 'Inter', sans-serif;
+            font-size: 1rem;
+            color: rgba(255, 255, 255, 0.5);
+            font-weight: 600;
+            letter-spacing: 0.25em;
+            text-transform: uppercase;
+            animation: pulseText 2s infinite;
         }
 
         #leaderboard {
             position: absolute;
-            top: 10px;
-            right: 10px;
-            background: rgba(0, 0, 0, 0.7);
-            border: 1px solid rgba(255, 255, 255, 0.3);
-            padding: 10px;
-            border-radius: 5px;
-            color: white;
-            font-family: 'Courier New', Courier, monospace;
+            top: 20px;
+            right: 20px;
+            background: rgba(5, 5, 5, 0.6);
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            backdrop-filter: blur(8px);
+            padding: 15px;
+            color: #ffffff;
+            font-family: 'Inter', sans-serif;
             display: none;
-            min-width: 220px;
+            min-width: 250px;
             z-index: 200;
             pointer-events: none;
+            box-sizing: border-box;
         }
 
         #leaderboard table {
@@ -555,27 +686,54 @@
 
         #leaderboard th {
             text-align: left;
-            border-bottom: 1px solid #777;
-            padding-bottom: 5px;
-            color: #FFD700;
-            font-size: 14px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.15);
+            padding-bottom: 10px;
+            color: rgba(255, 255, 255, 0.5);
+            font-size: 0.75rem;
+            font-weight: 600;
+            letter-spacing: 0.15em;
+            text-transform: uppercase;
+        }
+
+        #leaderboard th:not(:first-child) {
+            text-align: center;
         }
 
         #leaderboard td {
-            padding: 3px 0;
-            text-align: center;
-            font-size: 14px;
+            padding: 10px 0;
+            font-size: 0.85rem;
+            font-weight: 400;
+            color: rgba(255, 255, 255, 0.7);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+            letter-spacing: 0.05em;
         }
 
-        #leaderboard td:first-child {
-            text-align: left;
+        #leaderboard td:not(:first-child) {
+            text-align: center;
+        }
+
+        #leaderboard tr:last-child td {
+            border-bottom: none;
+        }
+
+        #leaderboard tr.current-player-row td {
+            color: #ffffff;
+            font-weight: 700;
+        }
+
+        #leaderboard tr.current-player-row td:first-child::before {
+            content: '▶ ';
+            font-size: 0.7rem;
+            color: #ff4444;
+            vertical-align: middle;
+            margin-right: 8px;
         }
 
         .color-indicator {
-            width: 12px;
-            height: 12px;
+            width: 10px;
+            height: 10px;
             display: inline-block;
-            border: 1px solid rgba(255, 255, 255, 0.4);
+            border: 1px solid rgba(255, 255, 255, 0.3);
             vertical-align: middle;
         }
     </style>
@@ -583,11 +741,16 @@
 
 <body>
 
+    <div id="ui-alert">
+        <span id="ui-alert-text"></span>
+    </div>
+
     <div id="lobby-overlay">
         <div id="ui-3d-container"></div>
         <div id="step-login" class="panel-box">
             <div class="lobby-title">BATTLE THUNDER</div>
-            <input type="text" id="username" placeholder="PILOT CALLSIGN" maxlength="10">
+            <div class="credit-text">Created by E-Money aka Breadmaster/MbappeFartBubble</div>
+            <input type="text" id="username" placeholder="ENTER USERNAME" maxlength="10">
             <button onclick="goToMenu()">ENTER HANGAR</button>
         </div>
 
@@ -615,8 +778,8 @@
             <div class="lobby-title">SQUADRON</div>
             <div class="room-code-display">ROOM CODE: <span id="display-room-code" class="highlight-text">----</span></div>
             <div id="player-list"></div>
-            <button id="start-btn" onclick="startGame()" style="display:none;">LAUNCH MISSION</button>
-            <div id="waiting-msg" class="waiting-text">WAITING FOR HOST TO LAUNCH...</div>
+            <button id="start-btn" onclick="startGame()" style="display:none;">START MISSION</button>
+            <div id="waiting-msg" class="waiting-text">WAITING FOR HOST TO START...</div>
             
             <button onclick="leaveSquadron()" class="secondary-btn" style="margin-top: 40px;">LEAVE SQUADRON</button>
         </div>
@@ -637,12 +800,12 @@
     <div class="hud-container" id="hud-main">
         <div class="hud-box">
             <h1 id="hud-name">PLAYER</h1>
-            <div class="stat">SPEED: <span id="speedVal">0</span> knots</div>
-            <div class="stat">THROT: <span id="throtVal">0</span>%</div>
-            <div class="stat">ALT: <span id="altVal">0</span> m</div>
-            <div class="stat">HDG: <span id="headingVal">0</span>°</div>
-            <div class="stat" style="color:#ff4444">HEALTH: <span id="hpVal">100</span>%</div>
-            <div class="stat" id="stallWarn" style="color:red; display:none;">!! STALL !!</div>
+            <div class="stat-row"><span>SPEED</span><span class="stat-val"><span id="speedVal">0</span> KTS</span></div>
+            <div class="stat-row"><span>THROTTLE</span><span class="stat-val"><span id="throtVal">0</span>%</span></div>
+            <div class="stat-row"><span>ALTITUDE</span><span class="stat-val" id="altValContainer"><span id="altVal">0</span> M</span></div>
+            <div class="stat-row"><span>HEADING</span><span class="stat-val"><span id="headingVal">0</span>°</span></div>
+            <div class="stat-row health-row"><span>HEALTH</span><span class="stat-val"><span id="hpVal">100</span>%</span></div>
+            <div id="stallWarn" style="display:none;">!! STALL WARNING !!</div>
 
             <div class="radar" id="radar">
                 <div class="radar-center"></div>
@@ -666,17 +829,17 @@
     </div>
 
     <div id="crash-msg" class="crash-msg">
-        <div id="death-reason" style="font-size:32px; color:red; margin-bottom:10px;">YOU CRASHED</div>
-        <span style="font-size:20px; color:white;" id="respawn-text">RESPAWNING...</span>
+        <div id="death-reason">YOU CRASHED</div>
+        <span id="respawn-text">RESPAWNING...</span>
     </div>
 
     <div id="controls">
-        <b style="color:#FFD700">CONTROLS:</b><br>
-        [W/S] or [UP/DOWN] Pitch<br>
-        [A/D] or [LEFT/RIGHT] Roll<br>
-        [SHIFT] Throttle Up<br>
-        [SPACE] Throttle Down<br>
-        <b style="color:red">[F] FIRE WEAPON</b><br>
+        <b>FLIGHT CONTROLS</b>
+        <span class="highlight-key">[W/S]</span> OR <span class="highlight-key">[↑/↓]</span> PITCH<br>
+        <span class="highlight-key">[A/D]</span> OR <span class="highlight-key">[←/→]</span> ROLL<br>
+        <span class="highlight-key">[SHIFT]</span> THROTTLE UP<br>
+        <span class="highlight-key">[SPACE]</span> THROTTLE DOWN<br>
+        <span class="action-fire">[F] FIRE WEAPON</span>
     </div>
     
     <button id="quit-btn" onclick="quitGame()">QUIT MISSION</button>
@@ -698,6 +861,24 @@
 
         // Helper to yield main thread and allow UI/CSS to unfreeze
         const yieldToBrowser = () => new Promise(resolve => setTimeout(resolve, 5));
+
+        // --- CUSTOM UI NOTIFICATIONS ---
+        let alertTimeout;
+        window.showUIAlert = function(msg, duration = 3000) {
+            const alertBox = document.getElementById('ui-alert');
+            document.getElementById('ui-alert-text').innerText = msg;
+            alertBox.style.display = 'block';
+            
+            // reset animation
+            alertBox.style.animation = 'none';
+            alertBox.offsetHeight; 
+            alertBox.style.animation = 'dropDown 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards';
+
+            if(alertTimeout) clearTimeout(alertTimeout);
+            alertTimeout = setTimeout(() => { alertBox.style.display = 'none'; }, duration);
+        };
+
+        let hasConnectedOnce = false;
 
         // --- UI 3D WIREFRAME PLANE SYSTEM ---
         let uiScene, uiCamera, uiRenderer, uiPlane;
@@ -953,6 +1134,19 @@
 
         initUI3D();
         setUICameraView('login');
+        
+        window.onload = () => {
+            // Restore session if we just clicked 'QUIT MISSION' to seamlessly drop into the menu
+            if (sessionStorage.getItem('returnToMenu') === 'true') {
+                sessionStorage.removeItem('returnToMenu');
+                const savedName = sessionStorage.getItem('username');
+                if (savedName) {
+                    document.getElementById('username').value = savedName;
+                    hasConnectedOnce = true;
+                    goToMenu();
+                }
+            }
+        };
         // --- END UI 3D WIREFRAME PLANE SYSTEM ---
 
         const CONFIG = {
@@ -1498,12 +1692,18 @@
 
         window.goToMenu = function () {
             const nameInput = document.getElementById('username');
-            if (!nameInput.value) { alert("ENTER CALLSIGN"); return; }
+            if (!nameInput.value) { showUIAlert("NO USERNAME ENTERED"); return; }
             myUsername = nameInput.value;
 
-            document.getElementById('step-login').style.display = 'none';
-            document.getElementById('step-connecting').style.display = 'block';
-            setUICameraView('connecting');
+            if (!hasConnectedOnce) {
+                document.getElementById('step-login').style.display = 'none';
+                document.getElementById('step-connecting').style.display = 'block';
+                setUICameraView('connecting');
+            } else {
+                document.getElementById('step-login').style.display = 'none';
+                document.getElementById('step-menu').style.display = 'block';
+                setUICameraView('menu');
+            }
 
             if (!socket) {
                 socket = io(SOCKET_URL, {
@@ -1513,21 +1713,24 @@
                 });
 
                 setTimeout(() => {
-                    if (!socket.connected) {
+                    if (!socket.connected && !hasConnectedOnce) {
                         document.getElementById('connection-status').textContent = 'Server is starting up, please wait...';
                     }
                 }, 2000);
 
                 socket.on('connect', () => {
                     console.log("Connected to server");
-                    document.getElementById('step-connecting').style.display = 'none';
-                    document.getElementById('step-menu').style.display = 'block';
-                    setUICameraView('menu');
+                    if (!hasConnectedOnce) {
+                        document.getElementById('step-connecting').style.display = 'none';
+                        document.getElementById('step-menu').style.display = 'block';
+                        setUICameraView('menu');
+                    }
+                    hasConnectedOnce = true;
                 });
 
                 socket.on('error_msg', (msg) => {
                     console.error('Server error:', msg);
-                    alert(msg);
+                    showUIAlert(msg);
                 });
 
                 socket.on('player_joined', (p) => {
@@ -1624,15 +1827,21 @@
         window.leaveSquadron = function() {
             if (socket) socket.disconnect();
             document.getElementById('step-waiting').style.display = 'none';
-            document.getElementById('step-login').style.display = 'block';
-            setUICameraView('login');
+            document.getElementById('step-menu').style.display = 'block';
+            setUICameraView('menu');
             isHost = false;
             myRoomCode = "";
             netPlayers = [];
             players = [];
+            socket.connect();
         };
 
         window.quitGame = function() {
+            // Because completely shutting down the WebGL canvas and trying to reboot it for another match
+            // inside a single-page app architecture is prone to severe memory leaks and duplicate renders,
+            // we use sessionStorage to temporarily store your username and securely reload the page back to the menu!
+            sessionStorage.setItem('returnToMenu', 'true');
+            sessionStorage.setItem('username', myUsername);
             window.location.reload();
         };
 
@@ -3034,7 +3243,7 @@ self.onmessage = function(e) {
 
             sortedPlayers.forEach(p => {
                 const tr = document.createElement('tr');
-                if (p.index === myPlayerIndex) tr.style.color = '#00ff00';
+                if (p.index === myPlayerIndex) tr.classList.add('current-player-row');
 
                 const nameTd = document.createElement('td');
                 nameTd.innerText = p.name;
@@ -3077,7 +3286,8 @@ self.onmessage = function(e) {
             if (alt !== _hudCache.alt) {
                 const altEl = document.getElementById('altVal');
                 altEl.innerText = alt;
-                altEl.style.color = alt < 20 ? 'red' : 'white';
+                const altContainer = document.getElementById('altValContainer');
+                altContainer.style.color = alt < 20 ? '#ff4444' : '#ffffff';
                 _hudCache.alt = alt;
             }
 
