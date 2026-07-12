@@ -405,7 +405,6 @@
             margin-top: 25px;
             margin-left: 40px;
             text-transform: uppercase;
-            animation: pulseText 2s infinite;
         }
 
         @keyframes pulseText {
@@ -933,6 +932,7 @@
                 // Line B-C
                 linePosArray[outIdx] = bx; linePosArray[outIdx+1] = by; linePosArray[outIdx+2] = bz;
                 linePosArray[outIdx+3] = cx; linePosArray[outIdx+4] = cy; linePosArray[outIdx+5] = cz;
+                mx = (bx+cx)/2; my = (by+cy)/2; mz = (bz+cx); // original maintained
                 mx = (bx+cx)/2; my = (by+cy)/2; mz = (bz+cz)/2;
                 centerArray[outIdx] = mx; centerArray[outIdx+1] = my; centerArray[outIdx+2] = mz;
                 centerArray[outIdx+3] = mx; centerArray[outIdx+4] = my; centerArray[outIdx+5] = mz;
@@ -1846,7 +1846,7 @@
             if (!usernameVal) { showUIAlert("NO USERNAME ENTERED!"); return; }
             myUsername = usernameVal;
 
-            if (!hasConnectedOnce) {
+            if (!hasConnectedOnce || (socket && !socket.connected)) {
                 document.getElementById('step-login').style.display = 'none';
                 document.getElementById('step-connecting').style.display = 'block';
                 setUICameraView('connecting');
@@ -1871,11 +1871,9 @@
 
                 socket.on('connect', () => {
                     console.log("Connected to server");
-                    if (!hasConnectedOnce) {
-                        document.getElementById('step-connecting').style.display = 'none';
-                        document.getElementById('step-menu').style.display = 'block';
-                        setUICameraView('menu');
-                    }
+                    document.getElementById('step-connecting').style.display = 'none';
+                    document.getElementById('step-menu').style.display = 'block';
+                    setUICameraView('menu');
                     hasConnectedOnce = true;
                 });
                 
@@ -1926,6 +1924,22 @@
 
                 socket.on('player_joined', (p) => {
                     if (isHost) {
+                        // Reject players entering with a duplicate name
+                        const normalizedNewName = p.name.trim().toLowerCase();
+                        const nameExists = netPlayers.some(np => np.name.trim().toLowerCase() === normalizedNewName);
+                        
+                        if (nameExists) {
+                            socket.emit('host_broadcast', {
+                                roomCode: myRoomCode,
+                                data: {
+                                    type: 'NAME_REJECTED',
+                                    targetId: p.id,
+                                    reason: `THE PILOT NAME "${p.name.toUpperCase()}" IS ALREADY IN USE.`
+                                }
+                            });
+                            return;
+                        }
+
                         const maxIdxNet = netPlayers.length > 0 ? Math.max(...netPlayers.map(n => n.index)) : -1;
                         const maxIdxPlayers = players.length > 0 ? Math.max(...players.map(pl => pl.index)) : -1;
                         const newIdx = Math.max(maxIdxNet, maxIdxPlayers) + 1;
@@ -1962,6 +1976,27 @@
                                 window.leaveSquadron();
                             }
                         }, 2000);
+                        return;
+                    }
+                    if (packet.type === 'NAME_REJECTED') {
+                        if (socket.id === packet.targetId) {
+                            showUIAlert(packet.reason, 4000);
+                            window.pendingJoinCode = null;
+                            const joinBtn = document.querySelector('button[onclick="joinGame()"]');
+                            if (joinBtn) {
+                                joinBtn.innerText = "JOIN SQUADRON";
+                                joinBtn.disabled = false;
+                            }
+                            socket.disconnect();
+                            document.getElementById('step-waiting').style.display = 'none';
+                            document.getElementById('step-menu').style.display = 'block';
+                            setUICameraView('menu');
+                            isHost = false;
+                            myRoomCode = "";
+                            netPlayers = [];
+                            players = [];
+                            socket.connect();
+                        }
                         return;
                     }
                     if (packet.type === 'LOBBY_UPDATE') {
@@ -2093,13 +2128,8 @@
                     }
                 });
             } else {
-                socket.connect();
-                if (socket.connected) {
-                    setTimeout(() => {
-                        document.getElementById('step-connecting').style.display = 'none';
-                        document.getElementById('step-menu').style.display = 'block';
-                        setUICameraView('menu');
-                    }, 500);
+                if (socket && !socket.connected) {
+                    socket.connect();
                 }
             }
         };
@@ -2118,8 +2148,17 @@
                 } else {
                     socket.emit('client_send', { roomCode: myRoomCode, data: { type: 'PLAYER_LEFT', idx: myPlayerIndex, id: socket.id } });
                 }
-                socket.disconnect();
+                // Yield thread to allow packet buffer flush before socket disconnection
+                setTimeout(() => {
+                    if (socket) socket.disconnect();
+                    completeLeave();
+                }, 100);
+            } else {
+                completeLeave();
             }
+        };
+
+        function completeLeave() {
             document.getElementById('step-waiting').style.display = 'none';
             document.getElementById('step-menu').style.display = 'block';
             setUICameraView('menu');
@@ -2128,7 +2167,7 @@
             netPlayers = [];
             players = [];
             if (socket) socket.connect();
-        };
+        }
 
         window.quitGame = function() {
             // Send explicit disconnect payload to gracefully unbind connection before reloading
@@ -2138,16 +2177,22 @@
                 } else {
                     socket.emit('client_send', { roomCode: myRoomCode, data: { type: 'PLAYER_LEFT', idx: myPlayerIndex, id: socket.id } });
                 }
-                socket.disconnect();
+                // Yield thread to allow packet buffer flush before socket disconnection
+                setTimeout(() => {
+                    if (socket) socket.disconnect();
+                    completeQuit();
+                }, 100);
+            } else {
+                completeQuit();
             }
-            
-            // Because completely shutting down the WebGL canvas and trying to reboot it for another match
-            // inside a single-page app architecture is prone to severe memory leaks and duplicate renders,
-            // we use sessionStorage to temporarily store your username and securely reload the page back to the menu!
+        };
+
+        function completeQuit() {
+            // Use sessionStorage to temporarily store your username and securely reload the page back to the menu
             sessionStorage.setItem('returnToMenu', 'true');
             sessionStorage.setItem('username', myUsername);
             window.location.reload();
-        };
+        }
 
         window.hostGame = function () {
             // Custom character set that explicitly excludes confusing letters O, I, L and numbers 0, 1
