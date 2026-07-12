@@ -403,6 +403,7 @@
             font-weight: 600;
             letter-spacing: 0.15em;
             margin-top: 25px;
+            margin-left: 40px;
             text-transform: uppercase;
             animation: pulseText 2s infinite;
         }
@@ -889,6 +890,7 @@
         };
 
         let hasConnectedOnce = false;
+        let isGeneratingWorld = false;
 
         // --- UI 3D WIREFRAME PLANE SYSTEM ---
         let uiScene, uiCamera, uiRenderer, uiPlane;
@@ -1182,6 +1184,7 @@
         let myPlayerIndex = -1;
         let netPlayers = [];
         let gameActive = false;
+        let lastGameStateTime = 0;
         
         // --- Intro Cinematic State ---
         let introCinematicActive = false;
@@ -1197,7 +1200,6 @@
             throttleUp: false, throttleDown: false,
             shoot: false
         };
-        let lastNetworkTick = 0;
         const NETWORK_TICK_RATE = 50;
 
         let scene, renderer;
@@ -1210,7 +1212,7 @@
         const _tempVec = new THREE.Vector3();
         const _tempDiff = new THREE.Vector3();
         const projectilePool = [];
-        const MAX_PROJECTILES = 80;
+        const MAX_PROJECTILES = 250;
         const sharedExplosionGeo = new THREE.BoxGeometry(0.4, 0.4, 0.4);
         let explosions = [];
         let csm;
@@ -1224,6 +1226,99 @@
         const turnSpeed = 0.012;
 
         let players = [];
+
+        // --- MULTIPLAYER NETWORK LOOP ---
+        // Decoupled from requestAnimationFrame so tabbing out never drops the connection.
+        setInterval(() => {
+            if (!gameActive) return;
+            const now = Date.now();
+            const me = players.find(p => p.index === myPlayerIndex);
+
+            if (!isHost && gameActive) {
+                if (lastGameStateTime > 0 && now - lastGameStateTime > 15000) {
+                    showUIAlert("HOST CONNECTION TIMED OUT. RETURNING TO MENU...", 4000);
+                    gameActive = false;
+                    setTimeout(() => { window.quitGame(); }, 2000);
+                }
+            }
+
+            if (me) {
+                const myData = {
+                    idx: me.index,
+                    pos: me.mesh.position,
+                    quat: { x: me.mesh.quaternion.x, y: me.mesh.quaternion.y, z: me.mesh.quaternion.z, w: me.mesh.quaternion.w },
+                    spd: me.speed, throt: me.throttle, hp: me.hp, crashed: me.isCrashed,
+                    killer: me.lastAttackerName, shoot: me.isFiring,
+                    spawned: !introCinematicActive
+                };
+                if (!isHost) socket.emit('client_send', { roomCode: myRoomCode, data: myData });
+            }
+
+            if (isHost) {
+                // Garbage Collection: Detect players who closed the tab without gracefully leaving
+                players.forEach(p => {
+                    if (!p.isLocal && !p.disconnected && p.lastPacketTime && now - p.lastPacketTime > 10000) {
+                        p.dispose();
+                        // Also purge them completely from the Lobby list so late joiners don't see them
+                        netPlayers = netPlayers.filter(np => np.id !== p.socketId);
+                        broadcastLobbyState();
+                    }
+                });
+                
+                // Actively purge disconnected players from iterating loop to prevent memory leaks over long sessions
+                players = players.filter(p => !p.disconnected);
+
+                const stateSnapshot = players.map(p => {
+                    let latestPos = p.mesh.position;
+                    let latestQuat = p.mesh.quaternion;
+                    let latestShoot = (p.index === myPlayerIndex ? p.isFiring : p.isShooting);
+                    
+                    // Grab the raw received network state if available, avoiding double-interpolation broadcast delays
+                    if (!p.isLocal && p.positionBuffer && p.positionBuffer.length > 0) {
+                        const latest = p.positionBuffer[p.positionBuffer.length - 1];
+                        latestPos = latest.pos;
+                        latestQuat = latest.quat;
+                        latestShoot = latest.shoot;
+                    }
+                    
+                    return {
+                        idx: p.index, 
+                        pos: latestPos,
+                        quat: { x: latestQuat.x, y: latestQuat.y, z: latestQuat.z, w: latestQuat.w },
+                        spd: p.speed, throt: p.throttle, hp: p.hp, crashed: p.isCrashed,
+                        k: p.kills, d: p.deaths, killer: p.lastAttackerName,
+                        shoot: latestShoot,
+                        spawned: p.isLocal ? !introCinematicActive : p.isSpawned
+                    };
+                });
+
+                socket.emit('host_broadcast', { roomCode: myRoomCode, data: { type: 'GAME_STATE', players: stateSnapshot } });
+                
+                if (!window.lastLeaderboardUpdate || now - window.lastLeaderboardUpdate > 1000) {
+                    window.lastLeaderboardUpdate = now;
+                    updateLeaderboard();
+                }
+            }
+        }, NETWORK_TICK_RATE);
+        
+        // Window blur event to stop active key loops from continuously firing over network if Alt-Tabbed
+        window.addEventListener('blur', () => {
+            inputState.pitchDown = false;
+            inputState.pitchUp = false;
+            inputState.rollLeft = false;
+            inputState.rollRight = false;
+            inputState.throttleUp = false;
+            inputState.throttleDown = false;
+            inputState.shoot = false;
+            
+            const me = players.find(p => p.index === myPlayerIndex);
+            if (me) {
+                me.inputs.pitch = 0;
+                me.inputs.roll = 0;
+                me.inputs.throttle = 0;
+                me.inputs.shoot = false;
+            }
+        });
 
         function createSeededRNG(seed) {
             let rng = seed % 233280;
@@ -1347,6 +1442,50 @@
 
             return Math.max(CONFIG.waterLevel - 60, finalHeight);
         }
+
+        // --- SECURE SPAWN POINT GENERATION ---
+        window.getSafeSpawn = function(minRadius = 1000, maxRadius = 3000) {
+            let x = 0, z = 0, y = 800;
+            let isSafe = false;
+            let attempts = 0;
+            
+            while (!isSafe && attempts < 50) {
+                const angle = Math.random() * Math.PI * 2;
+                const r = minRadius + Math.random() * (maxRadius - minRadius);
+                x = Math.sin(angle) * r;
+                z = Math.cos(angle) * r;
+                const terrainY = getTerrainHeight(x, z);
+                
+                // Guarantee spawn height is well above the immediate terrain floor
+                y = Math.max(800, terrainY + 300); 
+                
+                let safeForward = true;
+                // Predict the player's initial flight path: They will spawn facing the origin (0, y, 0)
+                const dir = new THREE.Vector3(-x, 0, -z).normalize();
+                
+                // Ray-march 800 meters ahead of the spawn point to ensure we aren't immediately flying into a cliff face
+                for(let d = 100; d <= 800; d += 100) {
+                    const checkX = x + dir.x * d;
+                    const checkZ = z + dir.z * d;
+                    const checkY = getTerrainHeight(checkX, checkZ);
+                    
+                    // If a mountain peak in front of us is higher than our spawn Y minus a small dip buffer, reject this spawn
+                    if (checkY >= y - 100) { 
+                        safeForward = false;
+                        break;
+                    }
+                }
+                
+                if (safeForward) isSafe = true;
+                attempts++;
+            }
+            
+            if (!isSafe) {
+                y = 1500; // Absolute fallback height to prevent immediate crash if grid is extremely chaotic
+            }
+            
+            return { x, y, z };
+        };
 
         function createPineTreeMesh() {
             const trunkGeo = new THREE.CylinderGeometry(1.5, 2.5, 12, 5);
@@ -1739,6 +1878,31 @@
                     }
                     hasConnectedOnce = true;
                 });
+                
+                // Disconnect Safety Catch
+                socket.on('disconnect', () => {
+                    if (gameActive) {
+                        showUIAlert("LOST CONNECTION TO SERVER. RETURNING TO MENU...", 4000);
+                        gameActive = false;
+                        setTimeout(() => { window.quitGame(); }, 2000);
+                    }
+                });
+
+                // Catch-all server dropped connection handler
+                socket.on('player_disconnected', (playerId) => {
+                    if (isHost) {
+                        netPlayers = netPlayers.filter(p => p.id !== playerId);
+                        if (!gameActive) {
+                            updateLobbyUI();
+                        } else {
+                            const p = players.find(pl => pl.socketId === playerId);
+                            if (p) {
+                                p.dispose();
+                            }
+                        }
+                        broadcastLobbyState();
+                    }
+                });
 
                 socket.on('error_msg', (msg) => {
                     console.error('Server error:', msg);
@@ -1762,14 +1926,44 @@
 
                 socket.on('player_joined', (p) => {
                     if (isHost) {
-                        const newIdx = netPlayers.length;
+                        const maxIdxNet = netPlayers.length > 0 ? Math.max(...netPlayers.map(n => n.index)) : -1;
+                        const maxIdxPlayers = players.length > 0 ? Math.max(...players.map(pl => pl.index)) : -1;
+                        const newIdx = Math.max(maxIdxNet, maxIdxPlayers) + 1;
+                        
                         netPlayers.push({ id: p.id, name: p.name, index: newIdx });
-                        updateLobbyUI();
                         broadcastLobbyState();
+                        
+                        // Full Drop-In Support: Instantly inject late joiners directly into active missions
+                        if (gameActive) {
+                            socket.emit('host_broadcast', { roomCode: myRoomCode, data: { type: 'START_GAME' } });
+                            const newP = new Player({id: p.id, name: p.name, index: newIdx}, false);
+                            newP.mesh.traverse(child => {
+                                child.frustumCulled = false;
+                                if (child.isMesh && child.material && typeof csm !== 'undefined') {
+                                    csm.setupMaterial(child.material);
+                                }
+                            });
+                            players.push(newP);
+                        } else {
+                            updateLobbyUI();
+                        }
                     }
                 });
 
                 socket.on('game_data', (packet) => {
+                    if (packet.type === 'HOST_LEFT') {
+                        showUIAlert("HOST DISCONNECTED. RETURNING TO MENU...", 4000);
+                        const wasInGame = gameActive;
+                        gameActive = false;
+                        setTimeout(() => {
+                            if (wasInGame) {
+                                window.quitGame();
+                            } else {
+                                window.leaveSquadron();
+                            }
+                        }, 2000);
+                        return;
+                    }
                     if (packet.type === 'LOBBY_UPDATE') {
                         // Check if we were actively waiting for a successful join confirmation before switching UIs
                         if (window.pendingJoinCode) {
@@ -1790,12 +1984,43 @@
                         }
 
                         netPlayers = packet.players;
-                        updateLobbyUI();
+                        
+                        if (!gameActive && !isGeneratingWorld) {
+                            updateLobbyUI();
+                        } else {
+                            // Mid-game drop-in OR user dropping in while our host is generating world.
+                            // Ensure existing clients safely dynamically spawn the new planes
+                            netPlayers.forEach(np => {
+                                if (players && !players.find(p => p.index === np.index)) {
+                                    const newP = new Player(np, np.id === socket.id);
+                                    if (newP.mesh) {
+                                        newP.mesh.traverse(child => {
+                                            child.frustumCulled = false;
+                                            if (child.isMesh && child.material && typeof csm !== 'undefined') {
+                                                csm.setupMaterial(child.material);
+                                            }
+                                        });
+                                    }
+                                    players.push(newP);
+                                }
+                            });
+                            
+                            // DISPOSE any players that have permanently left the session
+                            players.forEach(p => {
+                                if (!p.isLocal && !netPlayers.find(np => np.index === p.index)) {
+                                    p.dispose();
+                                }
+                            });
+                        }
+
                         if (!isHost) {
                             const me = netPlayers.find(p => p.id === socket.id);
                             if (me) myPlayerIndex = me.index;
                         }
                     } else if (packet.type === 'START_GAME') {
+                        if (gameActive || isGeneratingWorld) return; 
+                        isGeneratingWorld = true;
+                        
                         document.getElementById('lobby-overlay').style.display = 'none';
                         const uiContainer = document.getElementById('ui-3d-container');
                         if (uiContainer) document.getElementById('bake-overlay').appendChild(uiContainer);
@@ -1809,7 +2034,7 @@
                     } else if (packet.type === 'GAME_STATE') {
                         if (gameActive) handleGameState(packet);
                     } else if (packet.type === 'HIT_EVENT') {
-                        if (gameActive) {
+                        if (gameActive && !isHost) { 
                             const target = players.find(p => p.index === packet.targetIdx);
                             if (target && target.index === myPlayerIndex) {
                                 target.takeDamage(packet.dmg, packet.attackerIdx);
@@ -1819,34 +2044,51 @@
                 });
 
                 socket.on('player_data', (packet) => {
-                    if (isHost && gameActive) {
-                        const p = players.find(pl => pl.index === packet.data.idx);
-
-                        if (packet.data.type === 'PLAYER_DIED') {
-                            const victim = p;
-                            if (victim) {
-                                victim.deaths++;
-                                if (packet.data.attackerIdx !== null && packet.data.attackerIdx !== -1) {
-                                    const attacker = players.find(pa => pa.index === packet.data.attackerIdx);
-                                    if (attacker && attacker.index !== victim.index) {
-                                        attacker.kills++;
-                                    }
+                    if (isHost) {
+                        if (packet.data.type === 'PLAYER_LEFT') {
+                            netPlayers = netPlayers.filter(p => p.id !== packet.data.id && p.index !== packet.data.idx);
+                            if (!gameActive) {
+                                updateLobbyUI();
+                            } else {
+                                const p = players.find(pl => pl.index === packet.data.idx);
+                                if (p) {
+                                    p.dispose();
                                 }
                             }
+                            broadcastLobbyState();
                             return;
                         }
 
-                        if (packet.data.type === 'HIT_EVENT') {
-                            socket.emit('host_broadcast', { roomCode: myRoomCode, data: packet.data });
-                            if (packet.data.targetIdx === myPlayerIndex) {
-                                const localMe = players.find(pl => pl.index === myPlayerIndex);
-                                if (localMe) localMe.takeDamage(packet.data.dmg, packet.data.attackerIdx);
+                        if (gameActive) {
+                            const p = players.find(pl => pl.index === packet.data.idx);
+                            if (p) p.lastPacketTime = Date.now();
+
+                            if (packet.data.type === 'PLAYER_DIED') {
+                                const victim = p;
+                                if (victim) {
+                                    victim.deaths++;
+                                    if (packet.data.attackerIdx !== null && packet.data.attackerIdx !== -1) {
+                                        const attacker = players.find(pa => pa.index === packet.data.attackerIdx);
+                                        if (attacker && attacker.index !== victim.index) {
+                                            attacker.kills++;
+                                        }
+                                    }
+                                }
+                                return;
                             }
-                            return;
-                        }
 
-                        if (p) {
-                            p.syncData(packet.data);
+                            if (packet.data.type === 'HIT_EVENT') {
+                                socket.emit('host_broadcast', { roomCode: myRoomCode, data: packet.data });
+                                if (packet.data.targetIdx === myPlayerIndex) {
+                                    const localMe = players.find(pl => pl.index === myPlayerIndex);
+                                    if (localMe) localMe.takeDamage(packet.data.dmg, packet.data.attackerIdx);
+                                }
+                                return;
+                            }
+
+                            if (p) {
+                                p.syncData(packet.data);
+                            }
                         }
                     }
                 });
@@ -1870,7 +2112,14 @@
         };
 
         window.leaveSquadron = function() {
-            if (socket) socket.disconnect();
+            if (socket && socket.connected) {
+                if (isHost) {
+                    socket.emit('host_broadcast', { roomCode: myRoomCode, data: { type: 'HOST_LEFT' } });
+                } else {
+                    socket.emit('client_send', { roomCode: myRoomCode, data: { type: 'PLAYER_LEFT', idx: myPlayerIndex, id: socket.id } });
+                }
+                socket.disconnect();
+            }
             document.getElementById('step-waiting').style.display = 'none';
             document.getElementById('step-menu').style.display = 'block';
             setUICameraView('menu');
@@ -1878,10 +2127,20 @@
             myRoomCode = "";
             netPlayers = [];
             players = [];
-            socket.connect();
+            if (socket) socket.connect();
         };
 
         window.quitGame = function() {
+            // Send explicit disconnect payload to gracefully unbind connection before reloading
+            if (socket && socket.connected) {
+                if (isHost) {
+                    socket.emit('host_broadcast', { roomCode: myRoomCode, data: { type: 'HOST_LEFT' } });
+                } else {
+                    socket.emit('client_send', { roomCode: myRoomCode, data: { type: 'PLAYER_LEFT', idx: myPlayerIndex, id: socket.id } });
+                }
+                socket.disconnect();
+            }
+            
             // Because completely shutting down the WebGL canvas and trying to reboot it for another match
             // inside a single-page app architecture is prone to severe memory leaks and duplicate renders,
             // we use sessionStorage to temporarily store your username and securely reload the page back to the menu!
@@ -2071,6 +2330,7 @@
                 this.name = config.name;
                 this.isLocal = isLocal;
                 this.isSpawned = false;
+                this.disconnected = false;
 
                 const planePalette = [
                     0xFF0000, 0x00FF00, 0xFFFF00, 0xFF00FF, 0xFF8C00,
@@ -2094,7 +2354,9 @@
 
                 this.isStalled = false;
                 this.flashTimer = 0;
-                this.prevShootState = false;
+                this.isShooting = false;
+                this.isFiring = false;
+                this.hasInitialSnap = false;
 
                 this.kills = 0;
                 this.deaths = 0;
@@ -2115,10 +2377,13 @@
                 this.camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 5.0, 150000);
                 this.mesh = this.createPlaneMesh(this.color);
 
-                const angle = (this.index / netPlayers.length) * Math.PI * 2;
-                const radius = 1000;
-                this.mesh.position.set(Math.sin(angle) * radius, 800, Math.cos(angle) * radius);
-                this.mesh.lookAt(0, 800, 0);
+                if (this.isLocal) {
+                    const safePos = window.getSafeSpawn(1000, 3000);
+                    this.mesh.position.set(safePos.x, safePos.y, safePos.z);
+                    this.mesh.lookAt(0, safePos.y, 0);
+                } else {
+                    this.mesh.position.set(0, 1500, 0);
+                }
 
                 scene.add(this.mesh);
 
@@ -2126,6 +2391,17 @@
                 this.radarBlip.className = 'radar-blip';
                 if (this.index !== myPlayerIndex) {
                     document.getElementById('radar').appendChild(this.radarBlip);
+                }
+            }
+            
+            dispose() {
+                this.disconnected = true;
+                this.mesh.visible = false;
+                if (this.radarBlip && this.radarBlip.parentNode) {
+                    this.radarBlip.parentNode.removeChild(this.radarBlip);
+                }
+                if (this.engineSound) {
+                    this.engineSound.stop();
                 }
             }
 
@@ -2277,7 +2553,7 @@
                 this.isCrashed = true;
                 this.speed = 0;
                 this.mesh.visible = false;
-                this.radarBlip.style.display = 'none';
+                if (this.radarBlip) this.radarBlip.style.display = 'none';
                 this.engineSound.stop();
                 SoundGen.playExplosion();
                 explosions.push(new Explosion(this.mesh.position, 0xff0000));
@@ -2331,12 +2607,17 @@
             }
 
             reset() {
-                const angle = Math.random() * Math.PI * 2;
-                const r = 1000 + Math.random() * 500;
-                this.mesh.position.set(Math.sin(angle) * r, 800, Math.cos(angle) * r);
-                this.mesh.lookAt(0, 800, 0);
+                if (this.isLocal) {
+                    const safePos = window.getSafeSpawn(1000, 3000);
+                    this.mesh.position.set(safePos.x, safePos.y, safePos.z);
+                    this.mesh.lookAt(0, safePos.y, 0);
+                    this.virtualChasePos = null;
+                }
+                
                 this.speed = 1.0875;
                 this.throttle = 0.5;
+                this.smoothedPitch = 0;
+                this.smoothedRoll = 0;
                 this.hp = 100;
                 this.currentAmmo = this.maxAmmo;
                 this.isReloading = false;
@@ -2344,11 +2625,14 @@
                 this.isCrashed = false;
                 this.lastAttackerName = null;
                 this.mesh.visible = true;
-                this.radarBlip.style.display = 'block';
+                if (this.radarBlip) this.radarBlip.style.display = 'block';
                 this.engineSound.restart();
                 this.positionBuffer = [];
+                this.hasInitialSnap = false;
                 this.lastRespawnTime = Date.now();
                 this.respawnTimer = 0;
+                this.flashTimer = 0;
+                if (this.muzzleFlash) this.muzzleFlash.visible = false;
 
                 if (this.index === myPlayerIndex) document.getElementById('crash-msg').style.display = 'none';
             }
@@ -2423,7 +2707,9 @@
                     }
                 }
 
-                if (!this.isReloading && effShoot && now - this.lastShot > 80) {
+                this.isFiring = (!this.isReloading && effShoot);
+
+                if (this.isFiring && now - this.lastShot > 80) {
                     this.lastShot = now;
                     this.currentAmmo--;
                     if (this.currentAmmo <= 0) {
@@ -2500,25 +2786,38 @@
                 this.hp = data.hp;
 
                 if (data.pos && data.quat) {
+                    // Prevent interpolation NaN failures from packets arriving simultaneously by strictly enforcing monotonic receipt times
+                    let rTime = Date.now();
+                    if (this.positionBuffer.length > 0) {
+                        const lastT = this.positionBuffer[this.positionBuffer.length - 1].timestamp;
+                        if (rTime <= lastT) {
+                            rTime = lastT + 1;
+                        }
+                    }
+
                     let bufferItem;
                     if (this.positionBuffer.length >= 20) {
                         bufferItem = this.positionBuffer.shift();
-                        bufferItem.timestamp = Date.now();
+                        bufferItem.timestamp = rTime;
                         bufferItem.pos.set(data.pos.x, data.pos.y, data.pos.z);
                         bufferItem.quat.set(
-                            data.quat._x || data.quat.x, data.quat._y || data.quat.y,
-                            data.quat._z || data.quat.z, data.quat._w || data.quat.w
+                            data.quat.x !== undefined ? data.quat.x : data.quat._x,
+                            data.quat.y !== undefined ? data.quat.y : data.quat._y,
+                            data.quat.z !== undefined ? data.quat.z : data.quat._z,
+                            data.quat.w !== undefined ? data.quat.w : data.quat._w
                         );
                         bufferItem.spd = data.spd;
                         bufferItem.throt = data.throt;
                         bufferItem.shoot = data.shoot;
                     } else {
                         bufferItem = {
-                            timestamp: Date.now(),
+                            timestamp: rTime,
                             pos: new THREE.Vector3(data.pos.x, data.pos.y, data.pos.z),
                             quat: new THREE.Quaternion(
-                                data.quat._x || data.quat.x, data.quat._y || data.quat.y,
-                                data.quat._z || data.quat.z, data.quat._w || data.quat.w
+                                data.quat.x !== undefined ? data.quat.x : data.quat._x,
+                                data.quat.y !== undefined ? data.quat.y : data.quat._y,
+                                data.quat.z !== undefined ? data.quat.z : data.quat._z,
+                                data.quat.w !== undefined ? data.quat.w : data.quat._w
                             ),
                             spd: data.spd, throt: data.throt, shoot: data.shoot
                         };
@@ -2532,11 +2831,8 @@
 
                 const renderTimestamp = Date.now() - 75;
 
-                if (this.positionBuffer.length === 0) return;
-                if (this.positionBuffer.length === 1) {
-                    const snap = this.positionBuffer[0];
-                    this.mesh.position.copy(snap.pos);
-                    this.mesh.quaternion.copy(snap.quat);
+                if (this.positionBuffer.length === 0) {
+                    this.isShooting = false;
                     return;
                 }
 
@@ -2544,28 +2840,44 @@
                     this.positionBuffer.shift();
                 }
 
-                if (this.positionBuffer.length >= 2 &&
-                    this.positionBuffer[0].timestamp <= renderTimestamp &&
-                    this.positionBuffer[1].timestamp >= renderTimestamp) {
+                if (this.positionBuffer.length >= 2) {
+                    if (this.positionBuffer[0].timestamp <= renderTimestamp && this.positionBuffer[1].timestamp >= renderTimestamp) {
+                        const prev = this.positionBuffer[0];
+                        const next = this.positionBuffer[1];
 
-                    const prev = this.positionBuffer[0];
-                    const next = this.positionBuffer[1];
+                        const totalTime = next.timestamp - prev.timestamp;
+                        const currentTime = renderTimestamp - prev.timestamp;
+                        
+                        let alpha = 0;
+                        if (totalTime > 0) {
+                            alpha = currentTime / totalTime;
+                        } else {
+                            alpha = 1.0;
+                        }
 
-                    const totalTime = next.timestamp - prev.timestamp;
-                    const currentTime = renderTimestamp - prev.timestamp;
-                    const alpha = currentTime / totalTime;
+                        this.mesh.position.lerpVectors(prev.pos, next.pos, alpha);
+                        this.mesh.quaternion.slerpQuaternions(prev.quat, next.quat, alpha);
 
-                    this.mesh.position.lerpVectors(prev.pos, next.pos, alpha);
-                    this.mesh.quaternion.slerpQuaternions(prev.quat, next.quat, alpha);
+                        this.speed = THREE.MathUtils.lerp(prev.spd, next.spd, alpha);
+                        this.throttle = THREE.MathUtils.lerp(prev.throt, next.throt, alpha);
 
-                    this.speed = THREE.MathUtils.lerp(prev.spd, next.spd, alpha);
-                    this.throttle = THREE.MathUtils.lerp(prev.throt, next.throt, alpha);
-
-                    if (next.shoot && !this.prevShootState) {
-                        SoundGen.playShoot();
-                        this.flashTimer = 0.1;
+                        this.isShooting = next.shoot;
+                        this.hasInitialSnap = true;
                     }
-                    this.prevShootState = next.shoot;
+                } else if (this.positionBuffer.length === 1) {
+                    const snap = this.positionBuffer[0];
+                    if (!this.hasInitialSnap) {
+                        this.mesh.position.copy(snap.pos);
+                        this.mesh.quaternion.copy(snap.quat);
+                        this.isShooting = snap.shoot;
+                        this.hasInitialSnap = true;
+                    } else {
+                        this.isShooting = snap.shoot;
+                        // Anti-stuck firing mechanism if packets are delayed
+                        if (renderTimestamp - snap.timestamp > 150) {
+                            this.isShooting = false;
+                        }
+                    }
                 }
             }
 
@@ -2577,6 +2889,25 @@
                         return; // Keep them completely hidden and silent until ready
                     } else {
                         this.mesh.visible = !this.isCrashed;
+                    }
+
+                    // Locally generate fully immersive tracer physics + localized sound for networked enemy gunfire
+                    if (this.isShooting && !this.isCrashed) {
+                        const now = Date.now();
+                        if (now - this.lastShot > 80) {
+                            this.lastShot = now;
+                            SoundGen.playShoot();
+                            this.flashTimer = 0.1;
+                            if (this.muzzleFlash) {
+                                this.muzzleFlash.visible = true;
+                                this.muzzleFlash.rotation.z = Math.random() * Math.PI;
+                            }
+                            _tempVec.set(0, 0, -4).applyMatrix4(this.mesh.matrixWorld);
+                            const p = projectilePool.find(proj => !proj.isActive);
+                            if (p) {
+                                p.activate(this.index, _tempVec, this.mesh.quaternion, this.speed);
+                            }
+                        }
                     }
                 }
 
@@ -3316,15 +3647,31 @@ self.onmessage = function(e) {
         }
 
         function handleGameState(packet) {
+            lastGameStateTime = Date.now();
+
             packet.players.forEach(pData => {
                 const p = players.find(pl => pl.index === pData.idx);
                 if (p) p.syncData(pData);
             });
-            updateLeaderboard();
+
+            // Player disposal is now handled robustly by LOBBY_UPDATE events instead of 
+            // transient GAME_STATE packet inclusion to prevent late-joiner race conditions.
+            
+            // Actively purge disconnected players from array to prevent memory leaks over time
+            players = players.filter(p => !p.disconnected);
+
+            const now = Date.now();
+            if (!window.lastLeaderboardUpdate || now - window.lastLeaderboardUpdate > 1000) {
+                window.lastLeaderboardUpdate = now;
+                updateLeaderboard();
+            }
         }
 
         function updateLeaderboard() {
-            const sortedPlayers = [...players].sort((a, b) => b.kills - a.kills);
+            const sortedPlayers = [...players].filter(p => !p.disconnected).sort((a, b) => {
+                if (b.kills !== a.kills) return b.kills - a.kills;
+                return a.deaths - b.deaths;
+            });
             const tbody = document.getElementById('leaderboard-body');
             tbody.innerHTML = '';
 
@@ -3422,11 +3769,11 @@ self.onmessage = function(e) {
             }
 
             players.forEach(p => {
-                if (p.index === myPlayerIndex) return;
+                if (p.index === myPlayerIndex || p.disconnected) return; // ignore dropped players
 
                 const blip = p.radarBlip;
                 // Only show radar blips for planes that are actively spawned in and alive
-                if (!p.isCrashed && p.mesh.visible && p.isSpawned) {
+                if (!p.isCrashed && p.mesh.visible && p.isSpawned && blip) {
                     _tempDiff.subVectors(p.mesh.position, me.mesh.position);
                     const enemyAngle = Math.atan2(_tempDiff.x, _tempDiff.z);
                     const delta = headingAngle - enemyAngle;
@@ -3442,7 +3789,7 @@ self.onmessage = function(e) {
                     }
                     blip.style.transform = `translate(-50%, -50%) translate(${70 + rX}px, ${70 + rY}px)`;
                     blip.style.display = 'block';
-                } else {
+                } else if (blip) {
                     blip.style.display = 'none';
                 }
             });
@@ -3485,25 +3832,13 @@ self.onmessage = function(e) {
             const me = players.find(p => p.index === myPlayerIndex);
 
             players.forEach(p => {
+                if (p.disconnected) return; // Skip updating disconnected players
+
                 if (p.index === myPlayerIndex) p.updatePhysics(timeScale);
                 else p.interpolatePosition();
                 
                 p.updateVisuals(timeScale);
             });
-
-            const now = Date.now();
-            if (me && now - lastNetworkTick > NETWORK_TICK_RATE) {
-                lastNetworkTick = now;
-                const myData = {
-                    idx: me.index,
-                    pos: me.mesh.position,
-                    quat: { x: me.mesh.quaternion.x, y: me.mesh.quaternion.y, z: me.mesh.quaternion.z, w: me.mesh.quaternion.w },
-                    spd: me.speed, throt: me.throttle, hp: me.hp, crashed: me.isCrashed,
-                    killer: me.lastAttackerName, shoot: me.inputs.shoot,
-                    spawned: !introCinematicActive // Alert server/peers when we officially spawn in
-                };
-                if (!isHost) socket.emit('client_send', { roomCode: myRoomCode, data: myData });
-            }
 
             for (const proj of projectilePool) {
                 if (!proj.isActive) continue;
@@ -3517,7 +3852,7 @@ self.onmessage = function(e) {
                 }
                 if (proj.ownerIdx === myPlayerIndex) {
                     for (let p of players) {
-                        if (p.index !== myPlayerIndex && !p.isCrashed && p.isSpawned) {
+                        if (p.index !== myPlayerIndex && !p.isCrashed && p.isSpawned && !p.disconnected) {
                             if (proj.mesh.position.distanceTo(p.mesh.position) < 12) {
                                 explosions.push(new Explosion(proj.mesh.position, 0xffaa00));
                                 SoundGen.playExplosion();
@@ -3525,7 +3860,6 @@ self.onmessage = function(e) {
                                 const hitData = { type: 'HIT_EVENT', targetIdx: p.index, attackerIdx: myPlayerIndex, dmg: 20 };
                                 if (isHost) {
                                     socket.emit('host_broadcast', { roomCode: myRoomCode, data: hitData });
-                                    if (p.index === myPlayerIndex) p.takeDamage(20, myPlayerIndex);
                                 } else {
                                     socket.emit('client_send', { roomCode: myRoomCode, data: hitData });
                                 }
@@ -3533,26 +3867,6 @@ self.onmessage = function(e) {
                             }
                         }
                     }
-                }
-            }
-
-            if (isHost) {
-                const stateSnapshot = players.map(p => ({
-                    idx: p.index, pos: p.mesh.position,
-                    quat: { x: p.mesh.quaternion.x, y: p.mesh.quaternion.y, z: p.mesh.quaternion.z, w: p.mesh.quaternion.w },
-                    spd: p.speed, throt: p.throttle, hp: p.hp, crashed: p.isCrashed,
-                    k: p.kills, d: p.deaths, killer: p.lastAttackerName,
-                    shoot: (p.index === myPlayerIndex ? p.inputs.shoot : (p.muzzleFlash ? p.muzzleFlash.visible : false)),
-                    spawned: p.isLocal ? !introCinematicActive : p.isSpawned
-                }));
-
-                if (now - (window.lastBroadcast || 0) > NETWORK_TICK_RATE) {
-                    window.lastBroadcast = now;
-                    socket.emit('host_broadcast', { roomCode: myRoomCode, data: { type: 'GAME_STATE', players: stateSnapshot } });
-                }
-                if (!window.lastLeaderboardUpdate || now - window.lastLeaderboardUpdate > 1000) {
-                    window.lastLeaderboardUpdate = now;
-                    updateLeaderboard();
                 }
             }
 
