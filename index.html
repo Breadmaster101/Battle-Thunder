@@ -771,7 +771,7 @@
             <button onclick="hostGame()">HOST SQUADRON</button>
             <div class="menu-divider"><span>OR</span></div>
             <!-- Strip confusing letters dynamically on input -->
-            <input type="text" id="room-code-input" placeholder="ENTER ROOM CODE" maxlength="4" oninput="this.value = this.value.toUpperCase().replace(/[01OIL]/g, '')" onkeypress="if(event.key === 'Enter') joinGame()">
+            <input type="text" id="room-code-input" placeholder="ENTER ROOM CODE" maxlength="4" oninput="this.value = this.value.toUpperCase().replace(/[^A-HJKMNPQRSTUVWXYZ2-9]/g, '')" onkeypress="if(event.key === 'Enter') joinGame()">
             <button onclick="joinGame()">JOIN SQUADRON</button>
             
             <button onclick="goBackToLogin()" class="secondary-btn" style="margin-top: 40px;">BACK TO LOGIN</button>
@@ -2161,6 +2161,7 @@
         function completeLeave() {
             document.getElementById('step-waiting').style.display = 'none';
             document.getElementById('step-menu').style.display = 'block';
+            document.getElementById('display-room-code').innerText = "----";
             setUICameraView('menu');
             isHost = false;
             myRoomCode = "";
@@ -2220,7 +2221,7 @@
 
         window.joinGame = function () {
             const codeEl = document.getElementById('room-code-input');
-            const code = codeEl.value.trim().toUpperCase();
+            const code = codeEl.value.trim().toUpperCase().replace(/[^A-HJKMNPQRSTUVWXYZ2-9]/g, '');
             
             if (!code) { showUIAlert("NO ROOM CODE ENTERED!"); return; }
             if (code.length !== 4) { showUIAlert("ROOM CODE MUST BE 4 CHARACTERS"); return; }
@@ -2255,6 +2256,19 @@
         };
 
         function updateLobbyUI() {
+            // Update start button and waiting message visibility dynamically based on current host status
+            const startBtn = document.getElementById('start-btn');
+            const waitingMsg = document.getElementById('waiting-msg');
+            if (startBtn && waitingMsg) {
+                if (isHost) {
+                    startBtn.style.display = 'block';
+                    waitingMsg.style.display = 'none';
+                } else {
+                    startBtn.style.display = 'none';
+                    waitingMsg.style.display = 'block';
+                }
+            }
+
             const list = document.getElementById('player-list');
             list.innerHTML = "";
             const planePaletteColors = [
