@@ -175,7 +175,7 @@
             color: rgba(255, 255, 255, 0.2);
         }
 
-        #lobby-overlay button, #bake-overlay button {
+        #lobby-overlay button:not(.discrete-btn), #bake-overlay button {
             background: transparent;
             color: #ffffff;
             border: 1px solid rgba(255, 255, 255, 0.15);
@@ -198,7 +198,7 @@
             z-index: 1;
         }
 
-        #lobby-overlay button::before, #bake-overlay button::before {
+        #lobby-overlay button:not(.discrete-btn)::before, #bake-overlay button::before {
             content: '';
             position: absolute;
             top: 0;
@@ -210,16 +210,16 @@
             z-index: -1;
         }
 
-        #lobby-overlay button:hover::before, #bake-overlay button:hover::before {
+        #lobby-overlay button:not(.discrete-btn):hover::before, #bake-overlay button:hover::before {
             width: 100%;
         }
 
-        #lobby-overlay button:hover {
+        #lobby-overlay button:not(.discrete-btn):hover {
             color: #000000;
             border-color: #ffffff;
         }
 
-        #lobby-overlay button::after, #bake-overlay button::after {
+        #lobby-overlay button:not(.discrete-btn)::after, #bake-overlay button::after {
             content: '→';
             position: absolute;
             right: 30px;
@@ -227,20 +227,20 @@
             transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1);
         }
 
-        #lobby-overlay button:hover::after, #bake-overlay button:hover::after {
+        #lobby-overlay button:not(.discrete-btn):hover::after, #bake-overlay button:hover::after {
             opacity: 1;
         }
 
-        #lobby-overlay button:disabled {
+        #lobby-overlay button:not(.discrete-btn):disabled {
             border-color: rgba(255, 255, 255, 0.05);
             color: rgba(255, 255, 255, 0.2);
             cursor: not-allowed;
         }
         
-        #lobby-overlay button:disabled:hover::before {
+        #lobby-overlay button:not(.discrete-btn):disabled:hover::before {
             width: 0%;
         }
-        #lobby-overlay button:disabled:hover::after {
+        #lobby-overlay button:not(.discrete-btn):disabled:hover::after {
             opacity: 0;
         }
 
@@ -260,6 +260,32 @@
         }
         .secondary-btn::after {
             content: '✕' !important;
+        }
+
+        /* ----- DISCRETE AI BUTTON STYLES ----- */
+        .discrete-btn {
+            font-family: 'Inter', sans-serif;
+            font-size: 0.75rem !important;
+            padding: 10px 15px !important;
+            color: rgba(255, 255, 255, 0.4) !important;
+            border: 1px dashed rgba(255, 255, 255, 0.2) !important;
+            background: transparent !important;
+            width: fit-content !important;
+            transition: all 0.3s ease !important;
+            cursor: pointer;
+            letter-spacing: 0.15em;
+            text-transform: uppercase;
+            border-radius: 0;
+        }
+        .discrete-btn:hover {
+            color: #ffffff !important;
+            border: 1px dashed rgba(255, 255, 255, 0.6) !important;
+            background: rgba(255, 255, 255, 0.05) !important;
+        }
+        
+        /* Fix for Kick Button styling */
+        .kick-btn::after, .kick-btn::before {
+            display: none !important;
         }
 
         .menu-divider {
@@ -319,7 +345,6 @@
         .room-code-display {
             font-size: 1rem;
             color: rgba(255,255,255,0.5);
-            margin-bottom: 30px;
             letter-spacing: 0.1em;
             font-weight: 600;
         }
@@ -336,12 +361,27 @@
         #player-list {
             text-align: left;
             margin: 0 0 30px 0;
-            min-height: 150px;
+            min-height: 161px;
+            max-height: 161px;
             border: 1px solid rgba(255, 255, 255, 0.1);
             padding: 0;
             background: rgba(0, 0, 0, 0.2);
             border-radius: 0;
-            overflow: hidden;
+            overflow-y: auto;
+            overflow-x: hidden;
+        }
+
+        #player-list::-webkit-scrollbar {
+            width: 6px;
+        }
+        #player-list::-webkit-scrollbar-track {
+            background: rgba(0, 0, 0, 0.2);
+        }
+        #player-list::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.3);
+        }
+        #player-list::-webkit-scrollbar-thumb:hover {
+            background: rgba(255, 255, 255, 0.6);
         }
 
         .player-row {
@@ -427,6 +467,72 @@
             width: 0%;
         }
         /* ----- END MODERN UI OVERLAYS ----- */
+
+        /* ----- VOLUME CONTROL UI ----- */
+        #volume-control {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            z-index: 5000;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            background: rgba(5, 5, 5, 0.6);
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            backdrop-filter: blur(8px);
+            padding: 10px;
+            border-radius: 0;
+            transition: all 0.3s ease;
+            overflow: hidden;
+            width: 24px;
+            height: 24px;
+            box-sizing: content-box;
+        }
+
+        #volume-control.in-game {
+            right: 290px;
+        }
+
+        #volume-control:hover {
+            width: 130px;
+        }
+
+        #volume-icon {
+            width: 24px;
+            height: 24px;
+            color: rgba(255, 255, 255, 0.7);
+            cursor: pointer;
+            flex-shrink: 0;
+            transition: color 0.3s;
+        }
+
+        #volume-control:hover #volume-icon {
+            color: #ffffff;
+        }
+
+        #volume-slider {
+            width: 90px;
+            margin: 0;
+            cursor: pointer;
+            opacity: 0;
+            transition: opacity 0.3s;
+            -webkit-appearance: none;
+            background: rgba(255,255,255,0.2);
+            height: 2px;
+            outline: none;
+        }
+
+        #volume-slider::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 10px;
+            height: 10px;
+            background: #ffffff;
+            border-radius: 50%;
+        }
+
+        #volume-control:hover #volume-slider {
+            opacity: 1;
+        }
 
         /* ----- IN-GAME UI OVERHAUL ----- */
         .hud-container {
@@ -673,10 +779,29 @@
             color: #ffffff;
             font-family: 'Inter', sans-serif;
             display: none;
-            min-width: 250px;
+            width: 250px;
             z-index: 200;
-            pointer-events: none;
+            pointer-events: auto;
             box-sizing: border-box;
+        }
+
+        #leaderboard-table-container {
+            max-height: calc(100vh - 280px);
+            overflow-y: auto;
+            padding-right: 5px;
+        }
+
+        #leaderboard-table-container::-webkit-scrollbar {
+            width: 6px;
+        }
+        #leaderboard-table-container::-webkit-scrollbar-track {
+            background: rgba(0, 0, 0, 0.2);
+        }
+        #leaderboard-table-container::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.3);
+        }
+        #leaderboard-table-container::-webkit-scrollbar-thumb:hover {
+            background: rgba(255, 255, 255, 0.6);
         }
 
         #leaderboard table {
@@ -685,8 +810,13 @@
         }
 
         #leaderboard th {
+            position: sticky;
+            top: 0;
+            background: transparent;
+            z-index: 2;
             text-align: left;
             border-bottom: 1px solid rgba(255, 255, 255, 0.15);
+            padding-top: 5px;
             padding-bottom: 10px;
             color: rgba(255, 255, 255, 0.5);
             font-size: 0.75rem;
@@ -741,6 +871,14 @@
 
 <body>
 
+    <div id="volume-control">
+        <svg id="volume-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
+            <path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"></path>
+        </svg>
+        <input type="range" id="volume-slider" min="0" max="1" step="0.01" value="1">
+    </div>
+
     <div id="cloud-whiteout" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(200, 200, 200, 0.95); z-index: 50; display: none; pointer-events: none;"></div>
 
     <div id="ui-alert">
@@ -779,7 +917,10 @@
 
         <div id="step-waiting" class="panel-box" style="display:none;">
             <div class="lobby-title">SQUADRON</div>
-            <div class="room-code-display">ROOM CODE: <span id="display-room-code" class="highlight-text">----</span></div>
+            <div class="room-header-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+                <div class="room-code-display" style="margin-bottom: 0;">ROOM CODE: <span id="display-room-code" class="highlight-text">----</span></div>
+                <button id="add-ai-btn" class="discrete-btn" onclick="addAIPlane()" style="display:none; margin: 0 !important;">ADD AI PLANE</button>
+            </div>
             <div id="player-list"></div>
             <button id="start-btn" onclick="startGame()" style="display:none;">START MISSION</button>
             <div id="waiting-msg" class="waiting-text">WAITING FOR HOST TO START...</div>
@@ -824,18 +965,20 @@
     </div>
 
     <div id="leaderboard">
-        <table>
-            <thead>
-                <tr>
-                    <th>PILOT</th>
-                    <th>C</th>
-                    <th>K</th>
-                    <th>D</th>
-                </tr>
-            </thead>
-            <tbody id="leaderboard-body">
-            </tbody>
-        </table>
+        <div id="leaderboard-table-container">
+            <table>
+                <thead>
+                    <tr>
+                        <th>PILOT</th>
+                        <th>C</th>
+                        <th>K</th>
+                        <th>D</th>
+                    </tr>
+                </thead>
+                <tbody id="leaderboard-body">
+                </tbody>
+            </table>
+        </div>
     </div>
 
     <div id="crash-msg" class="crash-msg">
@@ -1257,7 +1400,7 @@
             if (isHost) {
                 // Garbage Collection: Detect players who closed the tab without gracefully leaving
                 players.forEach(p => {
-                    if (!p.isLocal && !p.disconnected && p.lastPacketTime && now - p.lastPacketTime > 10000) {
+                    if (!p.isLocal && !p.isAI && !p.disconnected && p.lastPacketTime && now - p.lastPacketTime > 10000) {
                         p.dispose();
                         // Also purge them completely from the Lobby list so late joiners don't see them
                         netPlayers = netPlayers.filter(np => np.id !== p.socketId);
@@ -1271,10 +1414,10 @@
                 const stateSnapshot = players.map(p => {
                     let latestPos = p.mesh.position;
                     let latestQuat = p.mesh.quaternion;
-                    let latestShoot = (p.index === myPlayerIndex ? p.isFiring : p.isShooting);
+                    let latestShoot = (p.index === myPlayerIndex || p.isAI ? p.isFiring : p.isShooting);
                     
                     // Grab the raw received network state if available, avoiding double-interpolation broadcast delays
-                    if (!p.isLocal && p.positionBuffer && p.positionBuffer.length > 0) {
+                    if (!p.isLocal && !p.isAI && p.positionBuffer && p.positionBuffer.length > 0) {
                         const latest = p.positionBuffer[p.positionBuffer.length - 1];
                         latestPos = latest.pos;
                         latestQuat = latest.quat;
@@ -1592,7 +1735,12 @@
         masterCompressor.ratio.setValueAtTime(12, audioCtx.currentTime);
         masterCompressor.attack.setValueAtTime(0.003, audioCtx.currentTime);
         masterCompressor.release.setValueAtTime(0.25, audioCtx.currentTime);
-        masterCompressor.connect(audioCtx.destination);
+
+        const masterVolume = audioCtx.createGain();
+        masterVolume.gain.setValueAtTime(1.0, audioCtx.currentTime);
+
+        masterCompressor.connect(masterVolume);
+        masterVolume.connect(audioCtx.destination);
 
         const reverbDuration = 2.0;
         const reverbBuffer = audioCtx.createBuffer(2, audioCtx.sampleRate * reverbDuration, audioCtx.sampleRate);
@@ -1607,6 +1755,48 @@
         reverbMix.gain.value = 0.35;
         masterReverb.connect(reverbMix);
         reverbMix.connect(masterCompressor);
+
+        // --- UI Hook for Volume Control ---
+        document.addEventListener("DOMContentLoaded", () => {
+            const volSlider = document.getElementById('volume-slider');
+            const volIcon = document.getElementById('volume-icon');
+            let isMuted = false;
+            let preMuteVol = 1.0;
+
+            function updateVolumeIcon(val) {
+                if (val === 0) {
+                    volIcon.innerHTML = '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><line x1="23" y1="9" x2="17" y2="15"></line><line x1="17" y1="9" x2="23" y2="15"></line>';
+                } else if (val < 0.5) {
+                    volIcon.innerHTML = '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path>';
+                } else {
+                    volIcon.innerHTML = '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"></path>';
+                }
+            }
+
+            volSlider.addEventListener('input', (e) => {
+                resumeAudio();
+                const val = parseFloat(e.target.value);
+                masterVolume.gain.setValueAtTime(val, audioCtx.currentTime);
+                isMuted = val === 0;
+                updateVolumeIcon(val);
+            });
+
+            volIcon.addEventListener('click', () => {
+                resumeAudio();
+                if (isMuted) {
+                    masterVolume.gain.setValueAtTime(preMuteVol, audioCtx.currentTime);
+                    volSlider.value = preMuteVol;
+                    isMuted = false;
+                    updateVolumeIcon(preMuteVol);
+                } else {
+                    preMuteVol = parseFloat(volSlider.value) || 1.0;
+                    masterVolume.gain.setValueAtTime(0, audioCtx.currentTime);
+                    volSlider.value = 0;
+                    isMuted = true;
+                    updateVolumeIcon(0);
+                }
+            });
+        });
 
         function createNoiseBuffer(dur = 1) {
             const sz = audioCtx.sampleRate * dur;
@@ -1999,6 +2189,13 @@
                         }
                         return;
                     }
+                    if (packet.type === 'KICK_PLAYER') {
+                        if (socket.id === packet.targetId) {
+                            showUIAlert("YOU HAVE BEEN KICKED FROM THE SQUADRON", 4000);
+                            window.leaveSquadron();
+                        }
+                        return;
+                    }
                     if (packet.type === 'LOBBY_UPDATE') {
                         // Check if we were actively waiting for a successful join confirmation before switching UIs
                         if (window.pendingJoinCode) {
@@ -2114,9 +2311,9 @@
 
                             if (packet.data.type === 'HIT_EVENT') {
                                 socket.emit('host_broadcast', { roomCode: myRoomCode, data: packet.data });
-                                if (packet.data.targetIdx === myPlayerIndex) {
-                                    const localMe = players.find(pl => pl.index === myPlayerIndex);
-                                    if (localMe) localMe.takeDamage(packet.data.dmg, packet.data.attackerIdx);
+                                const target = players.find(pl => pl.index === packet.data.targetIdx);
+                                if (target && (target.index === myPlayerIndex || target.isAI)) {
+                                    target.takeDamage(packet.data.dmg, packet.data.attackerIdx);
                                 }
                                 return;
                             }
@@ -2214,6 +2411,7 @@
             document.getElementById('step-waiting').style.display = 'block';
             document.getElementById('display-room-code').innerText = code;
             document.getElementById('start-btn').style.display = 'block';
+            document.getElementById('add-ai-btn').style.display = 'block';
             document.getElementById('waiting-msg').style.display = 'none';
             updateLobbyUI();
             setUICameraView('waiting');
@@ -2255,16 +2453,92 @@
             }, 100);
         };
 
+        window.addAIPlane = function() {
+            if (!isHost) return;
+            const aiNames = [
+                "Viper", "Maverick", "Goose", "Iceman", "Jester", "Hollywood", 
+                "Wolfman", "Slider", "Cougar", "Merlin", "Sundown", "Chipper"
+            ];
+            let name = "AI PILOT";
+            for (let candidate of aiNames) {
+                if (!netPlayers.some(np => np.name.toUpperCase() === candidate.toUpperCase())) {
+                    name = candidate;
+                    break;
+                }
+            }
+            if (name === "AI PILOT") {
+                name = "AI PILOT " + (netPlayers.filter(np => np.isAI).length + 1);
+            }
+            
+            const maxIdxNet = netPlayers.length > 0 ? Math.max(...netPlayers.map(n => n.index)) : -1;
+            const maxIdxPlayers = players.length > 0 ? Math.max(...players.map(pl => pl.index)) : -1;
+            const newIdx = Math.max(maxIdxNet, maxIdxPlayers) + 1;
+            
+            const aiId = "ai_" + Date.now() + "_" + Math.floor(Math.random() * 1000);
+            
+            netPlayers.push({ id: aiId, name: name, index: newIdx, isAI: true });
+            
+            if (gameActive) {
+                const newP = new Player({id: aiId, name: name, index: newIdx, isAI: true}, false);
+                newP.mesh.traverse(child => {
+                    child.frustumCulled = false;
+                    if (child.isMesh && child.material && typeof csm !== 'undefined') {
+                        csm.setupMaterial(child.material);
+                    }
+                });
+                players.push(newP);
+            } else {
+                updateLobbyUI();
+            }
+            
+            broadcastLobbyState();
+        };
+
+        window.kickMember = function(id, index, isAI) {
+            if (!isHost) return;
+            
+            if (isAI) {
+                netPlayers = netPlayers.filter(np => np.id !== id);
+                if (gameActive) {
+                    const p = players.find(pl => pl.index === index);
+                    if (p) p.dispose();
+                } else {
+                    updateLobbyUI();
+                }
+                broadcastLobbyState();
+            } else {
+                socket.emit('host_broadcast', {
+                    roomCode: myRoomCode,
+                    data: {
+                        type: 'KICK_PLAYER',
+                        targetId: id
+                    }
+                });
+                
+                netPlayers = netPlayers.filter(np => np.id !== id);
+                if (gameActive) {
+                    const p = players.find(pl => pl.socketId === id);
+                    if (p) p.dispose();
+                } else {
+                    updateLobbyUI();
+                }
+                broadcastLobbyState();
+            }
+        };
+
         function updateLobbyUI() {
             // Update start button and waiting message visibility dynamically based on current host status
             const startBtn = document.getElementById('start-btn');
+            const addAiBtn = document.getElementById('add-ai-btn');
             const waitingMsg = document.getElementById('waiting-msg');
-            if (startBtn && waitingMsg) {
+            if (startBtn && waitingMsg && addAiBtn) {
                 if (isHost) {
                     startBtn.style.display = 'block';
+                    addAiBtn.style.display = 'block';
                     waitingMsg.style.display = 'none';
                 } else {
                     startBtn.style.display = 'none';
+                    addAiBtn.style.display = 'none';
                     waitingMsg.style.display = 'block';
                 }
             }
@@ -2280,25 +2554,57 @@
                 div.className = 'player-row';
                 div.style.display = 'flex';
                 div.style.alignItems = 'center';
+                div.style.justifyContent = 'space-between';
+                
+                const leftSide = document.createElement('div');
+                leftSide.style.display = 'flex';
+                leftSide.style.alignItems = 'center';
                 
                 const colorHex = planePaletteColors[p.index % planePaletteColors.length];
                 const swatch = document.createElement('span');
                 swatch.className = 'player-swatch';
                 swatch.style.backgroundColor = colorHex;
-                div.appendChild(swatch);
+                leftSide.appendChild(swatch);
                 
                 const nameSpan = document.createElement('span');
                 nameSpan.innerText = `[${p.index + 1}] ${p.name}`;
-                div.appendChild(nameSpan);
+                if (p.isAI) {
+                    nameSpan.innerText += " (AI)";
+                }
+                leftSide.appendChild(nameSpan);
                 
                 if (p.index === 0) {
                     const hostIcon = document.createElement('span');
                     hostIcon.className = 'host-indicator';
                     hostIcon.innerText = '★ HOST';
-                    div.appendChild(hostIcon);
+                    leftSide.appendChild(hostIcon);
                 }
                 
-                if (p.id === socket.id) div.style.color = "#00ff00"; 
+                if (p.id === socket.id) leftSide.style.color = "#00ff00"; 
+                div.appendChild(leftSide);
+
+                // Host Kick Button Implementation
+                if (isHost && p.id !== socket.id) {
+                    const kickBtn = document.createElement('button');
+                    kickBtn.className = 'kick-btn';
+                    kickBtn.innerText = 'KICK';
+                    kickBtn.style.padding = '4px 10px';
+                    kickBtn.style.fontSize = '0.75rem';
+                    kickBtn.style.width = 'auto';
+                    kickBtn.style.margin = '0';
+                    kickBtn.style.border = '1px solid #ff4444';
+                    kickBtn.style.color = '#ff4444';
+                    kickBtn.style.cursor = 'pointer';
+                    kickBtn.style.textDecoration = 'none'; // explicitly override any strikethrough logic
+                    kickBtn.onmouseover = () => { kickBtn.style.background = '#ff4444'; kickBtn.style.color = '#000'; };
+                    kickBtn.onmouseout = () => { kickBtn.style.background = 'transparent'; kickBtn.style.color = '#ff4444'; };
+                    kickBtn.onclick = (e) => {
+                        e.stopPropagation();
+                        kickMember(p.id, p.index, p.isAI);
+                    };
+                    div.appendChild(kickBtn);
+                }
+                
                 list.appendChild(div);
             });
         }
@@ -2388,7 +2694,8 @@
                 this.socketId = config.id;
                 this.name = config.name;
                 this.isLocal = isLocal;
-                this.isSpawned = false;
+                this.isAI = !!config.isAI;
+                this.isSpawned = this.isAI ? true : false;
                 this.disconnected = false;
 
                 const planePalette = [
@@ -2436,7 +2743,7 @@
                 this.camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 5.0, 150000);
                 this.mesh = this.createPlaneMesh(this.color);
 
-                if (this.isLocal) {
+                if (this.isLocal || this.isAI) {
                     const safePos = window.getSafeSpawn(1000, 3000);
                     this.mesh.position.set(safePos.x, safePos.y, safePos.z);
                     this.mesh.lookAt(0, safePos.y, 0);
@@ -2632,7 +2939,7 @@
             takeDamage(amount, attackerIdx) {
                 if (this.isCrashed) return;
 
-                if (this.index === myPlayerIndex) {
+                if (this.index === myPlayerIndex || this.isAI) {
                     this.hp -= amount;
                     if (this.hp <= 0) {
                         this.hp = 0;
@@ -2660,13 +2967,14 @@
                         const attacker = players.find(p => p.index === attackerIdx);
                         if (attacker && attacker.index !== this.index) attacker.kills++;
                     }
+                    socket.emit('host_broadcast', { roomCode: myRoomCode, data: deathData });
                 } else {
                     socket.emit('client_send', { roomCode: myRoomCode, data: deathData });
                 }
             }
 
             reset() {
-                if (this.isLocal) {
+                if (this.isLocal || this.isAI) {
                     const safePos = window.getSafeSpawn(1000, 3000);
                     this.mesh.position.set(safePos.x, safePos.y, safePos.z);
                     this.mesh.lookAt(0, safePos.y, 0);
@@ -3005,6 +3313,91 @@
                         p.mesh.material.dispose();
                         this.trailParticles.splice(i, 1);
                     }
+                }
+            }
+        }
+
+        function simulateAI(p, timeScale) {
+            if (p.isCrashed) return;
+            
+            // Find nearest non-crashed, active player (AI or human) as target
+            let nearestTarget = null;
+            let minDist = Infinity;
+            
+            players.forEach(other => {
+                if (other.index === p.index) return;
+                if (other.isCrashed) return;
+                if (!other.isSpawned) return;
+                if (other.disconnected) return;
+                
+                const d = p.mesh.position.distanceTo(other.mesh.position);
+                if (d < minDist) {
+                    minDist = d;
+                    nearestTarget = other;
+                }
+            });
+            
+            if (nearestTarget) {
+                const dir = _tempDiff.subVectors(nearestTarget.mesh.position, p.mesh.position);
+                const dist = dir.length();
+                
+                // Normalize target direction
+                const dirNorm = dir.clone().normalize();
+                const localTarget = dirNorm.applyQuaternion(p.mesh.quaternion.clone().invert());
+                
+                // Steer towards target:
+                // Roll to align localTarget.x to 0 (bring target onto our local vertical axis)
+                let targetRoll = 0;
+                if (Math.abs(localTarget.x) > 0.01) {
+                    // Turn TOWARDS target: If target is +X (right), roll should be negative (right)
+                    targetRoll = -localTarget.x * 3.0; 
+                }
+                p.inputs.roll = Math.max(-1.0, Math.min(1.0, targetRoll));
+                
+                // Pitch up/down to match vertical angle
+                let targetPitch = localTarget.y * 2.0;
+                // If target is behind us (localTarget.z > 0), perform loop or hard turn
+                if (localTarget.z > 0) {
+                    targetPitch = 1.0; 
+                    if (Math.abs(localTarget.x) < 0.1) {
+                        p.inputs.roll = 1.0; // break symmetry
+                    }
+                }
+                p.inputs.pitch = Math.max(-1.0, Math.min(1.0, targetPitch));
+                
+                // Firing mechanism: if target is in front of us, close, and aligned
+                p.inputs.shoot = (localTarget.z < 0 && (localTarget.x * localTarget.x + localTarget.y * localTarget.y < 0.03) && dist < 1200);
+            } else {
+                // No target, fly forward calmly and straight, or circle
+                p.inputs.pitch = 0.0;
+                p.inputs.roll = 0.1; // Gentle circle
+                p.inputs.shoot = false;
+            }
+            
+            // Ground avoidance override (highest priority)
+            const forwardDist = 350;
+            // Get AI's forward direction vector
+            const forwardVec = new THREE.Vector3(0, 0, -1).applyQuaternion(p.mesh.quaternion);
+            const futurePos = p.mesh.position.clone().addScaledVector(forwardVec, forwardDist);
+            const terrainAhead = getTerrainHeight(futurePos.x, futurePos.z);
+            const currentTerrain = getTerrainHeight(p.mesh.position.x, p.mesh.position.z);
+            const alertHeight = Math.max(terrainAhead, currentTerrain) + 120;
+            
+            if (p.mesh.position.y < alertHeight) {
+                p.inputs.pitch = 1.0; // Pull up hard
+                
+                // Roll to level wings securely mapping World Up to the AI's Local Space:
+                const worldUpLocal = new THREE.Vector3(0, 1, 0).applyQuaternion(p.mesh.quaternion.clone().invert());
+                p.inputs.roll = -worldUpLocal.x * 3.0;
+                p.inputs.throttle = 1.0; // Boost thrust
+            } else {
+                // Standard throttle maintenance
+                if (p.speed < stallSpeed + 0.3) {
+                    p.inputs.throttle = 1.0;
+                } else if (p.speed > maxSpeed - 0.3) {
+                    p.inputs.throttle = -1.0;
+                } else {
+                    p.inputs.throttle = 0.0;
                 }
             }
         }
@@ -3658,6 +4051,9 @@ self.onmessage = function(e) {
             leaderboard.style.display = 'block';
             leaderboard.style.opacity = '0';
             leaderboard.style.transition = 'opacity 1.5s ease';
+            
+            // Re-align audio controls when game fully starts
+            document.getElementById('volume-control').classList.add('in-game');
 
             const quitBtn = document.getElementById('quit-btn');
             quitBtn.style.display = 'block';
@@ -3893,8 +4289,14 @@ self.onmessage = function(e) {
             players.forEach(p => {
                 if (p.disconnected) return; // Skip updating disconnected players
 
-                if (p.index === myPlayerIndex) p.updatePhysics(timeScale);
-                else p.interpolatePosition();
+                if (p.index === myPlayerIndex) {
+                    p.updatePhysics(timeScale);
+                } else if (p.isAI && isHost) {
+                    simulateAI(p, timeScale);
+                    p.updatePhysics(timeScale);
+                } else {
+                    p.interpolatePosition();
+                }
                 
                 p.updateVisuals(timeScale);
             });
@@ -3909,16 +4311,20 @@ self.onmessage = function(e) {
                     proj.isActive = false; proj.mesh.visible = false;
                     continue;
                 }
-                if (proj.ownerIdx === myPlayerIndex) {
+                if (proj.ownerIdx === myPlayerIndex || (isHost && players.find(pl => pl.index === proj.ownerIdx && pl.isAI))) {
                     for (let p of players) {
-                        if (p.index !== myPlayerIndex && !p.isCrashed && p.isSpawned && !p.disconnected) {
+                        if (p.index !== proj.ownerIdx && !p.isCrashed && p.isSpawned && !p.disconnected) {
                             if (proj.mesh.position.distanceTo(p.mesh.position) < 12) {
                                 explosions.push(new Explosion(proj.mesh.position, 0xffaa00));
                                 SoundGen.playExplosion();
                                 proj.isActive = false; proj.mesh.visible = false;
-                                const hitData = { type: 'HIT_EVENT', targetIdx: p.index, attackerIdx: myPlayerIndex, dmg: 20 };
+                                const hitData = { type: 'HIT_EVENT', targetIdx: p.index, attackerIdx: proj.ownerIdx, dmg: 20 };
                                 if (isHost) {
                                     socket.emit('host_broadcast', { roomCode: myRoomCode, data: hitData });
+                                    const target = players.find(pl => pl.index === p.index);
+                                    if (target && (target.index === myPlayerIndex || target.isAI)) {
+                                        target.takeDamage(20, proj.ownerIdx);
+                                    }
                                 } else {
                                     socket.emit('client_send', { roomCode: myRoomCode, data: hitData });
                                 }
