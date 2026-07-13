@@ -992,6 +992,7 @@
         <span class="highlight-key">[A/D]</span> OR <span class="highlight-key">[←/→]</span> ROLL<br>
         <span class="highlight-key">[SHIFT]</span> THROTTLE UP<br>
         <span class="highlight-key">[SPACE]</span> THROTTLE DOWN<br>
+        <span class="highlight-key">[B]</span> HOLD TO LOOK BACK<br>
         <span class="action-fire">[F] FIRE WEAPON</span>
     </div>
     
@@ -1014,6 +1015,9 @@
 
         // Helper to yield main thread and allow UI/CSS to unfreeze
         const yieldToBrowser = () => new Promise(resolve => setTimeout(resolve, 5));
+
+        // Global flag to prevent false-positive server disconnection alerts when quitting
+        window.isQuitting = false;
 
         // --- CUSTOM UI NOTIFICATIONS ---
         let alertTimeout;
@@ -1341,7 +1345,8 @@
             pitchDown: false, pitchUp: false,
             rollLeft: false, rollRight: false,
             throttleUp: false, throttleDown: false,
-            shoot: false
+            shoot: false,
+            lookBack: false
         };
         const NETWORK_TICK_RATE = 50;
 
@@ -1453,6 +1458,7 @@
             inputState.throttleUp = false;
             inputState.throttleDown = false;
             inputState.shoot = false;
+            inputState.lookBack = false;
             
             const me = players.find(p => p.index === myPlayerIndex);
             if (me) {
@@ -1584,6 +1590,84 @@
             finalHeight += detail * canyonMask;
 
             return Math.max(CONFIG.waterLevel - 60, finalHeight);
+        }
+
+        // --- PRECISE VISUAL TERRAIN HEIGHT CALCULATION ---
+        let terrainGrid = null;
+        const TERRAIN_CELL_SIZE = 200;
+        let TERRAIN_GRID_DIM = 0;
+
+        function buildTerrainGrid(positions) {
+            window.terrainPositions = positions;
+            TERRAIN_GRID_DIM = Math.ceil(CONFIG.width / TERRAIN_CELL_SIZE);
+            terrainGrid = new Array(TERRAIN_GRID_DIM * TERRAIN_GRID_DIM);
+            for(let i = 0; i < terrainGrid.length; i++) terrainGrid[i] = [];
+            
+            const halfW = CONFIG.width / 2;
+            
+            for (let i = 0; i < positions.length; i += 9) {
+                const ax = positions[i], az = positions[i+2];
+                const bx = positions[i+3], bz = positions[i+5];
+                const cx = positions[i+6], cz = positions[i+8];
+                
+                const minX = Math.min(ax, bx, cx) + halfW;
+                const maxX = Math.max(ax, bx, cx) + halfW;
+                const minZ = Math.min(az, bz, cz) + halfW;
+                const maxZ = Math.max(az, bz, cz) + halfW;
+                
+                const startCol = Math.max(0, Math.floor(minX / TERRAIN_CELL_SIZE));
+                const endCol = Math.min(TERRAIN_GRID_DIM - 1, Math.floor(maxX / TERRAIN_CELL_SIZE));
+                const startRow = Math.max(0, Math.floor(minZ / TERRAIN_CELL_SIZE));
+                const endRow = Math.min(TERRAIN_GRID_DIM - 1, Math.floor(maxZ / TERRAIN_CELL_SIZE));
+                
+                for (let c = startCol; c <= endCol; c++) {
+                    for (let r = startRow; r <= endRow; r++) {
+                        terrainGrid[r * TERRAIN_GRID_DIM + c].push(i);
+                    }
+                }
+            }
+        }
+
+        function getTriangleHeightAtXZ(px, pz, ax, ay, az, bx, by, bz, cx, cy, cz) {
+            const det = (bz - cz) * (ax - cx) + (cx - bx) * (az - cz);
+            if (det === 0) return null;
+            
+            const l1 = ((bz - cz) * (px - cx) + (cx - bx) * (pz - cz)) / det;
+            const l2 = ((cz - az) * (px - cx) + (ax - cx) * (pz - cz)) / det;
+            const l3 = 1.0 - l1 - l2;
+            
+            if (l1 >= -0.01 && l2 >= -0.01 && l3 >= -0.01) {
+                return l1 * ay + l2 * by + l3 * cy;
+            }
+            return null;
+        }
+
+        function getVisualTerrainHeight(x, z) {
+            if (!terrainGrid || !window.terrainPositions) return getTerrainHeight(x, z);
+            
+            const halfW = CONFIG.width / 2;
+            const c = Math.floor((x + halfW) / TERRAIN_CELL_SIZE);
+            const r = Math.floor((z + halfW) / TERRAIN_CELL_SIZE);
+            
+            if (c >= 0 && c < TERRAIN_GRID_DIM && r >= 0 && r < TERRAIN_GRID_DIM) {
+                const cell = terrainGrid[r * TERRAIN_GRID_DIM + c];
+                let highest = -9999;
+                let found = false;
+                for (let j = 0; j < cell.length; j++) {
+                    const idx = cell[j];
+                    const ax = window.terrainPositions[idx], ay = window.terrainPositions[idx+1], az = window.terrainPositions[idx+2];
+                    const bx = window.terrainPositions[idx+3], by = window.terrainPositions[idx+4], bz = window.terrainPositions[idx+5];
+                    const cx = window.terrainPositions[idx+6], cy = window.terrainPositions[idx+7], cz = window.terrainPositions[idx+8];
+                    
+                    const h = getTriangleHeightAtXZ(x, z, ax, ay, az, bx, by, bz, cx, cy, cz);
+                    if (h !== null) {
+                        if (h > highest) highest = h;
+                        found = true;
+                    }
+                }
+                if (found) return highest;
+            }
+            return getTerrainHeight(x, z);
         }
 
         // --- SECURE SPAWN POINT GENERATION ---
@@ -2067,9 +2151,9 @@
                     hasConnectedOnce = true;
                 });
                 
-                // Disconnect Safety Catch
+                // Disconnect Safety Catch (with bypass for intentional quitting)
                 socket.on('disconnect', () => {
-                    if (gameActive) {
+                    if (gameActive && !window.isQuitting) {
                         showUIAlert("LOST CONNECTION TO SERVER. RETURNING TO MENU...", 4000);
                         gameActive = false;
                         setTimeout(() => { window.quitGame(); }, 2000);
@@ -2368,6 +2452,7 @@
         }
 
         window.quitGame = function() {
+            window.isQuitting = true;
             // Send explicit disconnect payload to gracefully unbind connection before reloading
             if (socket && socket.connected) {
                 if (isHost) {
@@ -2681,7 +2766,7 @@
                 if (!this.isActive) return false;
                 this.mesh.translateZ(-this.speed * timeScale);
                 this.life -= 1.0 * timeScale;
-                const tH = getTerrainHeight(this.mesh.position.x, this.mesh.position.z);
+                const tH = getVisualTerrainHeight(this.mesh.position.x, this.mesh.position.z);
                 if (this.mesh.position.y < tH) return false;
                 if (this.life <= 0) return false;
                 return true;
@@ -3097,7 +3182,8 @@
                     }
                 }
 
-                const tH = getTerrainHeight(this.mesh.position.x, this.mesh.position.z);
+                // Utilize exact visual geometry interpolator for precise collision against terrain
+                const tH = getVisualTerrainHeight(this.mesh.position.x, this.mesh.position.z);
                 let hitEnvironment = false;
 
                 if (this.mesh.position.y < tH + 2 || this.mesh.position.y < CONFIG.waterLevel - 5) {
@@ -3320,14 +3406,16 @@
         function simulateAI(p, timeScale) {
             if (p.isCrashed) return;
             
-            // Find nearest non-crashed, active player (AI or human) as target
+            // Find nearest non-crashed, active player
             let nearestTarget = null;
             let minDist = Infinity;
             
             players.forEach(other => {
                 if (other.index === p.index) return;
                 if (other.isCrashed) return;
-                if (!other.isSpawned) return;
+                
+                const isTargetSpawned = other.isLocal ? (typeof introCinematicActive !== 'undefined' ? !introCinematicActive : true) : other.isSpawned;
+                if (!isTargetSpawned) return;
                 if (other.disconnected) return;
                 
                 const d = p.mesh.position.distanceTo(other.mesh.position);
@@ -3337,67 +3425,77 @@
                 }
             });
             
+            let dist = Infinity;
+            let localTarget = null;
+
             if (nearestTarget) {
-                const dir = _tempDiff.subVectors(nearestTarget.mesh.position, p.mesh.position);
-                const dist = dir.length();
+                // LEAD CALCULATION (Deflection Shooting)
+                const bulletSpeed = p.speed + 15.0; 
+                dist = p.mesh.position.distanceTo(nearestTarget.mesh.position);
                 
-                // Normalize target direction
+                const timeToHit = dist / bulletSpeed; 
+                
+                // Predict target's future position
+                const targetForward = new THREE.Vector3(0, 0, -1).applyQuaternion(nearestTarget.mesh.quaternion);
+                const targetVelocity = targetForward.multiplyScalar(nearestTarget.speed);
+                const futurePos = nearestTarget.mesh.position.clone().addScaledVector(targetVelocity, timeToHit);
+                
+                const dir = _tempDiff.subVectors(futurePos, p.mesh.position);
                 const dirNorm = dir.clone().normalize();
-                const localTarget = dirNorm.applyQuaternion(p.mesh.quaternion.clone().invert());
+                localTarget = dirNorm.applyQuaternion(p.mesh.quaternion.clone().invert());
                 
-                // Steer towards target:
-                // Roll to align localTarget.x to 0 (bring target onto our local vertical axis)
+                // Steer towards predicted future position
                 let targetRoll = 0;
                 if (Math.abs(localTarget.x) > 0.01) {
-                    // Turn TOWARDS target: If target is +X (right), roll should be negative (right)
-                    targetRoll = -localTarget.x * 3.0; 
+                    targetRoll = -localTarget.x * 4.0; 
                 }
                 p.inputs.roll = Math.max(-1.0, Math.min(1.0, targetRoll));
                 
-                // Pitch up/down to match vertical angle
-                let targetPitch = localTarget.y * 2.0;
-                // If target is behind us (localTarget.z > 0), perform loop or hard turn
+                let targetPitch = localTarget.y * 3.0; 
                 if (localTarget.z > 0) {
                     targetPitch = 1.0; 
-                    if (Math.abs(localTarget.x) < 0.1) {
-                        p.inputs.roll = 1.0; // break symmetry
+                    if (Math.abs(localTarget.x) < 0.2) {
+                        p.inputs.roll = 1.0; 
                     }
                 }
                 p.inputs.pitch = Math.max(-1.0, Math.min(1.0, targetPitch));
                 
-                // Firing mechanism: if target is in front of us, close, and aligned
-                p.inputs.shoot = (localTarget.z < 0 && (localTarget.x * localTarget.x + localTarget.y * localTarget.y < 0.03) && dist < 1200);
+                // Fire if aligned with FUTURE position
+                p.inputs.shoot = (localTarget.z < 0 && (localTarget.x * localTarget.x + localTarget.y * localTarget.y < 0.08) && dist < 1500);
             } else {
-                // No target, fly forward calmly and straight, or circle
                 p.inputs.pitch = 0.0;
-                p.inputs.roll = 0.1; // Gentle circle
+                p.inputs.roll = 0.1; 
                 p.inputs.shoot = false;
             }
             
             // Ground avoidance override (highest priority)
-            const forwardDist = 350;
-            // Get AI's forward direction vector
+            const forwardDist = 450; 
             const forwardVec = new THREE.Vector3(0, 0, -1).applyQuaternion(p.mesh.quaternion);
-            const futurePos = p.mesh.position.clone().addScaledVector(forwardVec, forwardDist);
-            const terrainAhead = getTerrainHeight(futurePos.x, futurePos.z);
+            const checkPos = p.mesh.position.clone().addScaledVector(forwardVec, forwardDist);
+            const terrainAhead = getTerrainHeight(checkPos.x, checkPos.z);
             const currentTerrain = getTerrainHeight(p.mesh.position.x, p.mesh.position.z);
-            const alertHeight = Math.max(terrainAhead, currentTerrain) + 120;
+            const alertHeight = Math.max(terrainAhead, currentTerrain) + 150; 
             
             if (p.mesh.position.y < alertHeight) {
-                p.inputs.pitch = 1.0; // Pull up hard
-                
-                // Roll to level wings securely mapping World Up to the AI's Local Space:
+                p.inputs.pitch = 1.0; 
                 const worldUpLocal = new THREE.Vector3(0, 1, 0).applyQuaternion(p.mesh.quaternion.clone().invert());
-                p.inputs.roll = -worldUpLocal.x * 3.0;
-                p.inputs.throttle = 1.0; // Boost thrust
+                p.inputs.roll = -worldUpLocal.x * 4.0;
+                p.inputs.throttle = 1.0; 
+                p.inputs.shoot = false; 
             } else {
-                // Standard throttle maintenance
-                if (p.speed < stallSpeed + 0.3) {
+                // Smart throttle management
+                if (p.speed < stallSpeed + 0.4) {
                     p.inputs.throttle = 1.0;
-                } else if (p.speed > maxSpeed - 0.3) {
+                } else if (p.speed > maxSpeed - 0.2) {
                     p.inputs.throttle = -1.0;
                 } else {
-                    p.inputs.throttle = 0.0;
+                    if (nearestTarget && localTarget && localTarget.z < 0) {
+                        if (dist > 800) p.inputs.throttle = 1.0; 
+                        else if (dist < 300) p.inputs.throttle = -1.0; 
+                        else p.inputs.throttle = 0.0; 
+                    } else {
+                        p.inputs.throttle = 0.0;
+                    }
                 }
             }
         }
@@ -3824,6 +3922,9 @@ self.onmessage = function(e) {
                         geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
                         geometry.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
                         geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+                        
+                        // Compile precision spatial grid mapping for identical visual collision checks
+                        buildTerrainGrid(positions);
 
                         const terrainMaterial = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.9, metalness: 0.05, flatShading: true });
                         csm.setupMaterial(terrainMaterial);
@@ -4088,6 +4189,7 @@ self.onmessage = function(e) {
             if (code === 'ShiftLeft' || code === 'ShiftRight') inputState.throttleUp = state;
             if (code === 'Space') inputState.throttleDown = state;
             if (code === 'KeyF' || code === 'Enter') inputState.shoot = state;
+            if (code === 'KeyB') inputState.lookBack = state;
 
             const me = players.find(p => p.index === myPlayerIndex);
             if (me) {
@@ -4313,7 +4415,8 @@ self.onmessage = function(e) {
                 }
                 if (proj.ownerIdx === myPlayerIndex || (isHost && players.find(pl => pl.index === proj.ownerIdx && pl.isAI))) {
                     for (let p of players) {
-                        if (p.index !== proj.ownerIdx && !p.isCrashed && p.isSpawned && !p.disconnected) {
+                        const isTargetSpawned = p.isLocal ? (typeof introCinematicActive !== 'undefined' ? !introCinematicActive : true) : p.isSpawned;
+                        if (p.index !== proj.ownerIdx && !p.isCrashed && isTargetSpawned && !p.disconnected) {
                             if (proj.mesh.position.distanceTo(p.mesh.position) < 12) {
                                 explosions.push(new Explosion(proj.mesh.position, 0xffaa00));
                                 SoundGen.playExplosion();
@@ -4347,7 +4450,11 @@ self.onmessage = function(e) {
 
                 // --- CAMERA HANDLING ---
                 // Calculate ideal loose chase cam position continuously
-                _tempVec.set(0, 6, 18).applyMatrix4(me.mesh.matrixWorld);
+                if (inputState.lookBack) {
+                    _tempVec.set(0, 6, -25).applyMatrix4(me.mesh.matrixWorld);
+                } else {
+                    _tempVec.set(0, 6, 18).applyMatrix4(me.mesh.matrixWorld);
+                }
                 const lerpFactor = 1.0 - Math.pow(0.8, timeScale);
 
                 // We track a virtual 'chasePos' that runs all the time so it inherits the natural camera lag
@@ -4455,7 +4562,11 @@ self.onmessage = function(e) {
                     // Standard Chase Cam
                     // Since virtualChasePos is already handling the smooth follow logic, we just copy it directly
                     me.camera.position.copy(me.virtualChasePos);
-                    _tempDiff.set(0, 0, -30).applyMatrix4(me.mesh.matrixWorld);
+                    if (inputState.lookBack) {
+                        _tempDiff.set(0, 0, 30).applyMatrix4(me.mesh.matrixWorld);
+                    } else {
+                        _tempDiff.set(0, 0, -30).applyMatrix4(me.mesh.matrixWorld);
+                    }
                     me.camera.lookAt(_tempDiff);
                 }
 
