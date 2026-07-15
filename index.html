@@ -2773,6 +2773,9 @@
             }
         }
 
+        // Shared Geometry to optimize Vortex instantiation in the particle loop
+        const sharedVortexGeo = new THREE.IcosahedronGeometry(0.35, 0);
+
         class Player {
             constructor(config, isLocal) {
                 this.index = config.index;
@@ -2915,6 +2918,11 @@
                 leftTip.position.set(0.8, -0.2, -1);
                 leftTip.rotation.x = -0.05; leftTip.rotation.y = -0.2;
 
+                // Add spatial tracking anchors explicitly for wingtip vortices
+                this.leftAnchor = new THREE.Object3D();
+                this.leftAnchor.position.set(7.5, 0, 0.5);
+                leftTip.add(this.leftAnchor);
+
                 const rightWing = new THREE.Mesh(wGeo, bodyMat);
                 rightWing.position.set(-0.8, -0.2, -1);
                 rightWing.rotation.x = -0.05; rightWing.rotation.y = 0.2; rightWing.scale.x = -1;
@@ -2922,6 +2930,11 @@
                 const rightTip = new THREE.Mesh(wTipGeo, highlightMat);
                 rightTip.position.set(-0.8, -0.2, -1);
                 rightTip.rotation.x = -0.05; rightTip.rotation.y = 0.2; rightTip.scale.x = -1;
+
+                // Add spatial tracking anchor explicitly for right wingtip vortex
+                this.rightAnchor = new THREE.Object3D();
+                this.rightAnchor.position.set(7.5, 0, 0.5);
+                rightTip.add(this.rightAnchor);
 
                 wingGroup.add(leftWing, rightWing, leftTip, rightTip);
                 planeGroup.add(wingGroup);
@@ -2996,6 +3009,37 @@
                 this.trailParticles.push({
                     mesh: mesh, life: 1.0, baseOpacity: opacity,
                     velocity: new THREE.Vector3((Math.random() - 0.5), (Math.random() - 0.5), (Math.random() - 0.5)).multiplyScalar(0.2)
+                });
+            }
+
+            createVortex(opacity = 0.3) {
+                if (!this.leftAnchor || !this.rightAnchor) return;
+                
+                // Create Left Vortex Particle
+                const geoL = new THREE.IcosahedronGeometry(0.35, 0);
+                const matL = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: opacity });
+                const meshL = new THREE.Mesh(geoL, matL);
+                const posL = new THREE.Vector3().setFromMatrixPosition(this.leftAnchor.matrixWorld);
+                meshL.position.copy(posL);
+                scene.add(meshL);
+                
+                // Append directly to the standard trail array for seamless cleanup lifecycle
+                this.trailParticles.push({
+                    mesh: meshL, life: 1.0, baseOpacity: opacity,
+                    velocity: new THREE.Vector3((Math.random() - 0.5)*0.1, (Math.random() - 0.5)*0.1, (Math.random() - 0.5)*0.1)
+                });
+
+                // Create Right Vortex Particle
+                const geoR = new THREE.IcosahedronGeometry(0.35, 0);
+                const matR = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: opacity });
+                const meshR = new THREE.Mesh(geoR, matR);
+                const posR = new THREE.Vector3().setFromMatrixPosition(this.rightAnchor.matrixWorld);
+                meshR.position.copy(posR);
+                scene.add(meshR);
+                
+                this.trailParticles.push({
+                    mesh: meshR, life: 1.0, baseOpacity: opacity,
+                    velocity: new THREE.Vector3((Math.random() - 0.5)*0.1, (Math.random() - 0.5)*0.1, (Math.random() - 0.5)*0.1)
                 });
             }
 
@@ -3385,6 +3429,17 @@
                 if (!this.isCrashed && this.speed > 0.5) {
                     if (Math.random() > 0.6) this.createTrail();
                     if (this.hp < 50 && Math.random() > 0.4) this.createTrail(0x222222, 0.8, 0.7);
+                }
+
+                // --- DYNAMIC WINGTIP CONTRAILS / VORTICES ---
+                if (!this.isCrashed && this.speed > 0.8) {
+                    // Calculate abstract 'G-Force' based on current control surface smoothing (aggressive maneuvers increase value)
+                    const gIntensity = Math.abs(this.smoothedPitch) * 1.5 + Math.abs(this.smoothedRoll) * 1.0;
+                    if (gIntensity > 0.6) {
+                        // Scale contrail opacity smoothly as G-forces increase beyond threshold
+                        const vortexOpacity = Math.min(0.6, (gIntensity - 0.6) * 0.4);
+                        this.createVortex(vortexOpacity);
+                    }
                 }
 
                 for (let i = this.trailParticles.length - 1; i >= 0; i--) {
