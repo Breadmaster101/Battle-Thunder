@@ -3171,6 +3171,10 @@
                 const flashMat = new THREE.MeshBasicMaterial({ color: 0xffff00, transparent: true, opacity: 0.8 });
                 this.muzzleFlash = new THREE.Mesh(flashGeo, flashMat);
                 this.muzzleFlash.position.set(0, 0, -10.5);
+                
+                const flashLight = new THREE.PointLight(0xffdd66, 150, 40);
+                this.muzzleFlash.add(flashLight);
+                
                 this.muzzleFlash.visible = false;
                 planeGroup.add(this.muzzleFlash);
 
@@ -3184,16 +3188,25 @@
                 return planeGroup;
             }
 
-            createTrail(color = 0xdddddd, size = 0.5, opacity = 0.4) {
+            createTrail(color = 0xdddddd, size = 0.5, opacity = 0.4, offset = new THREE.Vector3(0, 0, 6.5), isFlame = false) {
                 const geo = new THREE.IcosahedronGeometry(size, 0);
                 const mat = new THREE.MeshBasicMaterial({ color: color, transparent: true, opacity: opacity });
                 const mesh = new THREE.Mesh(geo, mat);
-                const pos = new THREE.Vector3(0, 0, 6.5).applyMatrix4(this.mesh.matrixWorld);
+                const pos = offset.clone().applyMatrix4(this.mesh.matrixWorld);
                 mesh.position.copy(pos);
                 scene.add(mesh);
+                
+                let vel;
+                if (isFlame) {
+                    vel = new THREE.Vector3((Math.random() - 0.5)*1.5, (Math.random() - 0.5)*1.5, (Math.random() - 0.5)*1.5).multiplyScalar(0.5);
+                } else {
+                    vel = new THREE.Vector3((Math.random() - 0.5), (Math.random() - 0.5), (Math.random() - 0.5)).multiplyScalar(0.2);
+                }
+                
                 this.trailParticles.push({
                     mesh: mesh, life: 1.0, baseOpacity: opacity,
-                    velocity: new THREE.Vector3((Math.random() - 0.5), (Math.random() - 0.5), (Math.random() - 0.5)).multiplyScalar(0.2)
+                    velocity: vel,
+                    isFlame: isFlame
                 });
             }
 
@@ -3640,10 +3653,31 @@
                     this.engineSound.stop();
                 }
 
-                if (!this.isCrashed && this.speed > 0.5) {
-                    if (Math.random() > 0.6) this.createTrail();
-                    if (this.hp < 50 && Math.random() > 0.4) this.createTrail(0x222222, 0.8, 0.7);
-                }
+                // --- PROGRESSIVE DAMAGE TRAILS ---
+if (!this.isCrashed && this.speed > 0.5) {
+    
+    // 1. Wing fuel vapor/smoke: Activates at 75% and stays active forever (no lower bound)
+    if (this.hp <= 75) {
+        if (Math.random() > 0.4) {
+            this.createTrail(0xcccccc, 0.4, 0.5, new THREE.Vector3(3.5, 0, 0.5));
+            this.createTrail(0xeeeeee, 0.3, 0.3, new THREE.Vector3(3.5, 0, 0.5));
+        }
+    } 
+    
+    // 2. Engine smoke: Activates independently once below 50%
+    if (this.hp <= 50 && this.hp > 25) {
+        if (Math.random() > 0.2) {
+            this.createTrail(0x444444, 0.8, 0.7, new THREE.Vector3(0, 0, 6.5));
+        }
+    } else if (this.hp <= 25) {
+        if (Math.random() > 0.1) {
+            this.createTrail(0x111111, 1.0, 0.9, new THREE.Vector3(0, 0, 6.5));
+        }
+        if (Math.random() > 0.6) {
+            this.createTrail(0xff6600, 0.5, 0.8, new THREE.Vector3(0, 0, 6.5), true);
+        }
+    }
+}
 
                 // --- DYNAMIC WINGTIP CONTRAILS / VORTICES ---
                 if (!this.isCrashed && this.speed > 0.8) {
@@ -3674,13 +3708,18 @@
 
                 for (let i = this.trailParticles.length - 1; i >= 0; i--) {
                     const p = this.trailParticles[i];
-                    p.life -= 0.02 * timeScale;
                     
-                    if (p.isWater) {
-                        p.velocity.y -= 0.15 * timeScale; // Gravity for the water arc
-                        p.mesh.scale.multiplyScalar(1.0 + (0.015 * timeScale));
+                    if (p.isFlame) {
+                        p.life -= 0.06 * timeScale;
+                        p.mesh.scale.multiplyScalar(1.0 - (0.05 * timeScale)); // shrink flame
                     } else {
-                        p.mesh.scale.multiplyScalar(1.0 + (0.05 * timeScale));
+                        p.life -= 0.02 * timeScale;
+                        if (p.isWater) {
+                            p.velocity.y -= 0.15 * timeScale; // Gravity for the water arc
+                            p.mesh.scale.multiplyScalar(1.0 + (0.015 * timeScale));
+                        } else {
+                            p.mesh.scale.multiplyScalar(1.0 + (0.05 * timeScale));
+                        }
                     }
 
                     p.mesh.position.addScaledVector(p.velocity, timeScale);
