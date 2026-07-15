@@ -1913,15 +1913,29 @@
         window.addEventListener('click', resumeAudio);
 
         const SoundGen = {
-            playShoot: () => {
+            playShoot: (pos) => {
                 const t = audioCtx.currentTime;
+                
+                const panner = audioCtx.createPanner();
+                panner.panningModel = 'HRTF';
+                panner.distanceModel = 'inverse';
+                panner.refDistance = 150;
+                panner.maxDistance = 15000;
+                panner.rolloffFactor = 0.8;
+                if (pos) {
+                    panner.positionX.value = pos.x;
+                    panner.positionY.value = pos.y;
+                    panner.positionZ.value = pos.z;
+                }
+                panner.connect(masterCompressor);
+
                 const osc = audioCtx.createOscillator();
                 const g = audioCtx.createGain();
                 osc.frequency.setValueAtTime(150, t);
                 osc.frequency.exponentialRampToValueAtTime(40, t + 0.08);
                 g.gain.setValueAtTime(0.6, t);
                 g.gain.exponentialRampToValueAtTime(0.01, t + 0.1);
-                osc.connect(g); g.connect(masterCompressor);
+                osc.connect(g); g.connect(panner);
                 osc.start(t); osc.stop(t + 0.1);
 
                 const m = audioCtx.createOscillator();
@@ -1931,7 +1945,7 @@
                 m.frequency.exponentialRampToValueAtTime(400, t + 0.04);
                 mg.gain.setValueAtTime(0.3, t);
                 mg.gain.exponentialRampToValueAtTime(0.01, t + 0.05);
-                m.connect(mg); mg.connect(masterCompressor);
+                m.connect(mg); mg.connect(panner);
                 m.start(t); m.stop(t + 0.05);
 
                 const n = audioCtx.createBufferSource();
@@ -1944,19 +1958,33 @@
                 ng.gain.setValueAtTime(1.0, t);
                 ng.gain.exponentialRampToValueAtTime(0.01, t + 0.25);
                 n.connect(f); f.connect(ng);
-                ng.connect(masterCompressor);
-                ng.connect(masterReverb);
+                ng.connect(panner);
+                panner.connect(masterReverb);
                 n.start(t); n.stop(t + 0.25);
             },
-            playExplosion: () => {
+            playExplosion: (pos) => {
                 const t = audioCtx.currentTime;
+                
+                const panner = audioCtx.createPanner();
+                panner.panningModel = 'HRTF';
+                panner.distanceModel = 'inverse';
+                panner.refDistance = 600;
+                panner.maxDistance = 25000;
+                panner.rolloffFactor = 0.5;
+                if (pos) {
+                    panner.positionX.value = pos.x;
+                    panner.positionY.value = pos.y;
+                    panner.positionZ.value = pos.z;
+                }
+                panner.connect(masterCompressor);
+
                 const osc = audioCtx.createOscillator();
                 const g = audioCtx.createGain();
                 osc.frequency.setValueAtTime(80, t);
                 osc.frequency.exponentialRampToValueAtTime(10, t + 1.5);
                 g.gain.setValueAtTime(2.0, t);
                 g.gain.exponentialRampToValueAtTime(0.01, t + 2.0);
-                osc.connect(g); g.connect(masterCompressor);
+                osc.connect(g); g.connect(panner);
                 osc.start(t); osc.stop(t + 2.0);
 
                 const n = audioCtx.createBufferSource();
@@ -1969,9 +1997,66 @@
                 ng.gain.setValueAtTime(2.0, t);
                 ng.gain.exponentialRampToValueAtTime(0.01, t + 3.0);
                 n.connect(f); f.connect(ng);
-                ng.connect(masterCompressor);
-                ng.connect(masterReverb);
+                ng.connect(panner);
+                panner.connect(masterReverb);
                 n.start(t); n.stop(t + 3.0);
+            },
+            playBulletWaterHit: (pos) => {
+                const t = audioCtx.currentTime;
+                
+                const panner = audioCtx.createPanner();
+                panner.panningModel = 'HRTF';
+                panner.distanceModel = 'inverse';
+                panner.refDistance = 50;
+                panner.maxDistance = 5000;
+                panner.rolloffFactor = 1.0;
+                if (pos) {
+                    panner.positionX.value = pos.x;
+                    panner.positionY.value = pos.y;
+                    panner.positionZ.value = pos.z;
+                }
+                panner.connect(masterCompressor);
+
+                const n = audioCtx.createBufferSource();
+                n.buffer = noiseBuf1;
+                const f = audioCtx.createBiquadFilter();
+                f.type = 'bandpass';
+                f.frequency.setValueAtTime(1200, t);
+                f.Q.setValueAtTime(1.0, t);
+                const ng = audioCtx.createGain();
+                ng.gain.setValueAtTime(0.4, t);
+                ng.gain.exponentialRampToValueAtTime(0.01, t + 0.15);
+                n.connect(f); f.connect(ng);
+                ng.connect(panner);
+                n.start(t); n.stop(t + 0.15);
+            },
+            playBulletDirtHit: (pos) => {
+                const t = audioCtx.currentTime;
+                
+                const panner = audioCtx.createPanner();
+                panner.panningModel = 'HRTF';
+                panner.distanceModel = 'inverse';
+                panner.refDistance = 50;
+                panner.maxDistance = 5000;
+                panner.rolloffFactor = 1.0;
+                if (pos) {
+                    panner.positionX.value = pos.x;
+                    panner.positionY.value = pos.y;
+                    panner.positionZ.value = pos.z;
+                }
+                panner.connect(masterCompressor);
+
+                const n = audioCtx.createBufferSource();
+                n.buffer = noiseBuf1;
+                const f = audioCtx.createBiquadFilter();
+                f.type = 'lowpass';
+                f.frequency.setValueAtTime(400, t);
+                const ng = audioCtx.createGain();
+                ng.gain.setValueAtTime(0.5, t);
+                ng.gain.exponentialRampToValueAtTime(0.01, t + 0.1);
+                n.connect(f); f.connect(ng);
+                ng.connect(panner);
+                n.start(t); n.stop(t + 0.1);
             }
         };
 
@@ -1987,9 +2072,9 @@
                     this.panner = audioCtx.createPanner();
                     this.panner.panningModel = 'HRTF';
                     this.panner.distanceModel = 'inverse';
-                    this.panner.refDistance = 50;
-                    this.panner.maxDistance = 8000;
-                    this.panner.rolloffFactor = 1.0;
+                    this.panner.refDistance = 150;
+                    this.panner.maxDistance = 15000;
+                    this.panner.rolloffFactor = 0.8;
                     this.gain.connect(this.panner);
                     this.panner.connect(masterCompressor);
                 } else {
@@ -2734,9 +2819,95 @@
                 return active;
             }
             dispose() {
+                if (this.particles.length > 0) this.particles[0].material.dispose();
                 for (let p of this.particles) {
                     scene.remove(p);
-                    p.material.dispose();
+                }
+            }
+        }
+
+        class WaterSplash {
+            constructor(position) {
+                this.particles = [];
+                const particleCount = 8;
+                const material = new THREE.MeshBasicMaterial({ color: 0xddffff, transparent: true, opacity: 0.8 });
+                for (let i = 0; i < particleCount; i++) {
+                    const mesh = new THREE.Mesh(sharedExplosionGeo, material);
+                    mesh.position.copy(position);
+                    // Lock splash exactly at water level
+                    mesh.position.y = CONFIG.waterLevel;
+                    mesh.velocity = new THREE.Vector3(
+                        (Math.random() - 0.5) * 2.0,
+                        1.0 + Math.random() * 2.0,
+                        (Math.random() - 0.5) * 2.0
+                    );
+                    mesh.life = 1.0;
+                    mesh.rotSpeed = (Math.random() - 0.5) * 0.4;
+                    scene.add(mesh);
+                    this.particles.push(mesh);
+                }
+            }
+            update(timeScale) {
+                let active = false;
+                for (let p of this.particles) {
+                    if (p.life > 0) {
+                        p.velocity.y -= 0.15 * timeScale; // Gravity
+                        p.position.addScaledVector(p.velocity, timeScale);
+                        p.rotation.x += p.rotSpeed * timeScale;
+                        p.life -= 0.04 * timeScale;
+                        p.scale.setScalar(p.life * 1.5);
+                        p.material.opacity = p.life * 0.8;
+                        active = true;
+                    } else { p.visible = false; }
+                }
+                return active;
+            }
+            dispose() {
+                if (this.particles.length > 0) this.particles[0].material.dispose();
+                for (let p of this.particles) {
+                    scene.remove(p);
+                }
+            }
+        }
+
+        class DirtPuff {
+            constructor(position) {
+                this.particles = [];
+                const particleCount = 6;
+                const material = new THREE.MeshBasicMaterial({ color: 0x4a3525, transparent: true, opacity: 1.0 });
+                for (let i = 0; i < particleCount; i++) {
+                    const mesh = new THREE.Mesh(sharedExplosionGeo, material);
+                    mesh.position.copy(position);
+                    mesh.velocity = new THREE.Vector3(
+                        (Math.random() - 0.5) * 1.5,
+                        0.5 + Math.random() * 1.5,
+                        (Math.random() - 0.5) * 1.5
+                    );
+                    mesh.life = 1.0;
+                    mesh.rotSpeed = (Math.random() - 0.5) * 0.4;
+                    scene.add(mesh);
+                    this.particles.push(mesh);
+                }
+            }
+            update(timeScale) {
+                let active = false;
+                for (let p of this.particles) {
+                    if (p.life > 0) {
+                        p.velocity.y -= 0.08 * timeScale; 
+                        p.position.addScaledVector(p.velocity, timeScale);
+                        p.rotation.x += p.rotSpeed * timeScale;
+                        p.life -= 0.05 * timeScale;
+                        p.scale.setScalar(p.life * 2.0);
+                        p.material.opacity = p.life;
+                        active = true;
+                    } else { p.visible = false; }
+                }
+                return active;
+            }
+            dispose() {
+                if (this.particles.length > 0) this.particles[0].material.dispose();
+                for (let p of this.particles) {
+                    scene.remove(p);
                 }
             }
         }
@@ -2747,6 +2918,7 @@
                 this.ownerIdx = -1;
                 this.speed = 0;
                 this.life = 0;
+                this.hitType = null;
                 const geo = new THREE.BoxGeometry(0.3, 0.3, 4);
                 const mat = new THREE.MeshBasicMaterial({ color: 0xffffaa });
                 this.mesh = new THREE.Mesh(geo, mat);
@@ -2757,6 +2929,7 @@
                 this.ownerIdx = ownerIdx;
                 this.speed = speed + 15.0;
                 this.life = 100;
+                this.hitType = null;
                 this.mesh.position.copy(position);
                 this.mesh.quaternion.copy(quaternion);
                 this.mesh.visible = true;
@@ -2766,9 +2939,21 @@
                 if (!this.isActive) return false;
                 this.mesh.translateZ(-this.speed * timeScale);
                 this.life -= 1.0 * timeScale;
+                
                 const tH = getVisualTerrainHeight(this.mesh.position.x, this.mesh.position.z);
-                if (this.mesh.position.y < tH) return false;
-                if (this.life <= 0) return false;
+                
+                if (this.mesh.position.y < CONFIG.waterLevel && tH <= CONFIG.waterLevel) {
+                    this.hitType = 'water';
+                    return false;
+                } else if (this.mesh.position.y < tH) {
+                    this.hitType = 'dirt';
+                    return false;
+                }
+                
+                if (this.life <= 0) {
+                    this.hitType = 'timeout';
+                    return false;
+                }
                 return true;
             }
         }
@@ -3079,7 +3264,7 @@
                 this.mesh.visible = false;
                 if (this.radarBlip) this.radarBlip.style.display = 'none';
                 this.engineSound.stop();
-                SoundGen.playExplosion();
+                SoundGen.playExplosion(this.mesh.position);
                 explosions.push(new Explosion(this.mesh.position, 0xff0000));
                 explosions.push(new Explosion(this.mesh.position, 0xffaa00));
 
@@ -3251,7 +3436,7 @@
                             this.muzzleFlash.visible = true;
                             this.muzzleFlash.rotation.z = Math.random() * Math.PI;
                         }
-                        SoundGen.playShoot();
+                        SoundGen.playShoot(this.mesh.position);
                     }
                 }
 
@@ -3422,7 +3607,7 @@
                         const now = Date.now();
                         if (now - this.lastShot > 80) {
                             this.lastShot = now;
-                            SoundGen.playShoot();
+                            SoundGen.playShoot(this.mesh.position);
                             this.flashTimer = 0.1;
                             if (this.muzzleFlash) {
                                 this.muzzleFlash.visible = true;
@@ -4513,9 +4698,15 @@ self.onmessage = function(e) {
             for (const proj of projectilePool) {
                 if (!proj.isActive) continue;
                 if (!proj.update(timeScale)) {
-                    if (proj.life > 0) {
+                    if (proj.hitType === 'water') {
+                        explosions.push(new WaterSplash(proj.mesh.position));
+                        SoundGen.playBulletWaterHit(proj.mesh.position);
+                    } else if (proj.hitType === 'dirt') {
+                        explosions.push(new DirtPuff(proj.mesh.position));
+                        SoundGen.playBulletDirtHit(proj.mesh.position);
+                    } else if (proj.life > 0 && proj.hitType !== 'timeout') {
                         explosions.push(new Explosion(proj.mesh.position, 0xffff00));
-                        SoundGen.playExplosion();
+                        SoundGen.playExplosion(proj.mesh.position);
                     }
                     proj.isActive = false; proj.mesh.visible = false;
                     continue;
@@ -4526,7 +4717,7 @@ self.onmessage = function(e) {
                         if (p.index !== proj.ownerIdx && !p.isCrashed && isTargetSpawned && !p.disconnected) {
                             if (proj.mesh.position.distanceTo(p.mesh.position) < 12) {
                                 explosions.push(new Explosion(proj.mesh.position, 0xffaa00));
-                                SoundGen.playExplosion();
+                                SoundGen.playExplosion(proj.mesh.position);
                                 proj.isActive = false; proj.mesh.visible = false;
                                 const hitData = { type: 'HIT_EVENT', targetIdx: p.index, attackerIdx: proj.ownerIdx, dmg: 20 };
                                 if (isHost) {
@@ -4702,7 +4893,7 @@ self.onmessage = function(e) {
                 // Broad-phase: check if the camera is near ANY cloud instance
                 for (let i = 0; i < cloudsData.length; i++) {
                     const c = cloudsData[i];
-                    const distSq = (camPos.x - c.x) ** 2 + (camPos.y - c.y) ** 2 + (camPos.z - c.z) ** 2;
+                    const distSq =(camPos.x - c.x) ** 2 + (camPos.y - c.y) ** 2 + (camPos.z - c.z) ** 2;
                     // Use a slightly larger broad-phase margin (x1.5) to ensure we check edge overlaps
                     if (distSq < cloudBaseRadiusSq * (c.scale * c.scale) * 1.5) {
                         nearCloud = true;
