@@ -1019,6 +1019,48 @@
         // Global flag to prevent false-positive server disconnection alerts when quitting
         window.isQuitting = false;
 
+        // Shared Global Math Objects (Drastically reduces GC allocation stuttering)
+        const _tempVec = new THREE.Vector3();
+        const _tempDiff = new THREE.Vector3();
+        const _tempQuat = new THREE.Quaternion();
+        const _raycaster = new THREE.Raycaster();
+        const _instanceMatrix = new THREE.Matrix4();
+        const _normalMatrix = new THREE.Matrix3();
+        const _rayDirUp = new THREE.Vector3(0, 1, 0);
+
+        // Variables for AI simulation (reused to avoid allocation GC spikes)
+        const _aiTargetForward = new THREE.Vector3();
+        const _aiTargetVelocity = new THREE.Vector3();
+        const _aiFuturePos = new THREE.Vector3();
+        const _aiDirNorm = new THREE.Vector3();
+        const _aiWorldUpLocal = new THREE.Vector3();
+        const _aiForwardVec = new THREE.Vector3();
+        const _aiCheckPos = new THREE.Vector3();
+
+        // Cached DOM Elements for HUD (Prevents Layout Thrashing)
+        const _DOM = {};
+        function cacheDOM() {
+            _DOM.speedVal = document.getElementById('speedVal');
+            _DOM.throtVal = document.getElementById('throtVal');
+            _DOM.hpVal = document.getElementById('hpVal');
+            _DOM.altVal = document.getElementById('altVal');
+            _DOM.altValContainerStyle = document.getElementById('altValContainer').style;
+            _DOM.headingVal = document.getElementById('headingVal');
+            _DOM.ammoText = document.getElementById('ammoText');
+            _DOM.ammoTextStyle = _DOM.ammoText.style;
+            _DOM.ammoBarStyle = document.getElementById('ammoBar').style;
+            _DOM.reloadWarnStyle = document.getElementById('reloadWarn').style;
+            _DOM.stallWarnStyle = document.getElementById('stallWarn').style;
+            _DOM.cloudWhiteoutStyle = document.getElementById('cloud-whiteout').style;
+        }
+
+        // Shared variables for render loop to eliminate per-frame allocations
+        const _cloudDummy = new THREE.Object3D();
+        const _cineDummyCam = new THREE.PerspectiveCamera(45, 1, 0.1, 1000);
+        const _cineStartOffset = new THREE.Vector3();
+        const _cineLocalLookAt = new THREE.Vector3();
+        const _cineEndLookAt = new THREE.Vector3();
+
         // --- CUSTOM UI NOTIFICATIONS ---
         let alertTimeout;
         window.showUIAlert = function(msg, duration = 3000) {
@@ -1046,8 +1088,6 @@
         let uiCurrentLookAt = new THREE.Vector3(0, 0, 0);
         let wireMat;
 
-        // Custom function to create a wireframe that looks identical to `wireframe: true`
-        // but supports our custom per-line shrinking shader.
         function createWireframeMesh(geo) {
             let nonIndexedGeo = geo;
             if (geo.index) {
@@ -1057,7 +1097,6 @@
             const posAttr = nonIndexedGeo.attributes.position;
             const numTriangles = posAttr.count / 3;
             
-            // 3 lines per triangle, 2 vertices per line, 3 floats per vertex
             const linePosArray = new Float32Array(numTriangles * 18);
             const centerArray = new Float32Array(numTriangles * 18);
             
@@ -1079,7 +1118,6 @@
                 // Line B-C
                 linePosArray[outIdx] = bx; linePosArray[outIdx+1] = by; linePosArray[outIdx+2] = bz;
                 linePosArray[outIdx+3] = cx; linePosArray[outIdx+4] = cy; linePosArray[outIdx+5] = cz;
-                mx = (bx+cx)/2; my = (by+cy)/2; mz = (bz+cx); // original maintained
                 mx = (bx+cx)/2; my = (by+cy)/2; mz = (bz+cz)/2;
                 centerArray[outIdx] = mx; centerArray[outIdx+1] = my; centerArray[outIdx+2] = mz;
                 centerArray[outIdx+3] = mx; centerArray[outIdx+4] = my; centerArray[outIdx+5] = mz;
@@ -1099,7 +1137,7 @@
             wireGeo.setAttribute('lineCenter', new THREE.BufferAttribute(centerArray, 3));
             
             const lines = new THREE.LineSegments(wireGeo, wireMat);
-            lines.renderOrder = 999; // Ensure it renders on top of transparent solid meshes
+            lines.renderOrder = 999;
             return lines;
         }
 
@@ -1115,7 +1153,6 @@
             uiRenderer.setPixelRatio(window.devicePixelRatio);
             container.appendChild(uiRenderer.domElement);
 
-            // Custom shader to allow line ends to shrink towards their own centers
             wireMat = new THREE.ShaderMaterial({
                 uniforms: {
                     color: { value: new THREE.Color(0xaaaaaa) },
@@ -1139,7 +1176,7 @@
                 `,
                 transparent: true,
                 depthWrite: false,
-                depthTest: false, // Prevents depth clipping with the plane model
+                depthTest: false,
                 blending: THREE.AdditiveBlending
             });
 
@@ -1295,18 +1332,15 @@
         setUICameraView('login');
         
         window.onload = () => {
-            // Restore session if we just clicked 'QUIT MISSION' to seamlessly drop into the menu
             if (sessionStorage.getItem('returnToMenu') === 'true') {
                 sessionStorage.removeItem('returnToMenu');
                 const savedName = sessionStorage.getItem('username');
                 if (savedName) {
                     document.getElementById('username').value = savedName;
-                    // Do not artificially fake hasConnectedOnce. Let it correctly show the connecting UI!
                     goToMenu();
                 }
             }
         };
-        // --- END UI 3D WIREFRAME PLANE SYSTEM ---
 
         const CONFIG = {
             width: 14000,
@@ -1322,7 +1356,7 @@
 
         const _audioForward = new THREE.Vector3();
         const _audioUp = new THREE.Vector3();
-        const _hudCache = { speed: -1, throt: -1, alt: -1, hdg: -1, hp: -1, stall: null, ammo: -1, reloading: null };
+        const _hudCache = { speed: -1, throt: -1, alt: -1, hdg: -1, hp: -1, stall: null, ammo: -1, reloading: null, cloudWhiteout: false };
 
         let socket;
         let isHost = false;
@@ -1333,7 +1367,6 @@
         let gameActive = false;
         let lastGameStateTime = 0;
         
-        // --- Intro Cinematic State ---
         let introCinematicActive = false;
         let introCinematicTime = 0;
         const INTRO_DURATION = 3.5;
@@ -1357,15 +1390,15 @@
         let cloudBaseRadiusSq = 0;
         const clock = new THREE.Clock();
 
-        const _tempVec = new THREE.Vector3();
-        const _tempDiff = new THREE.Vector3();
         const projectilePool = [];
         const MAX_PROJECTILES = 250;
+        let _lastProjIdx = 0;
         const sharedExplosionGeo = new THREE.BoxGeometry(0.4, 0.4, 0.4);
         let explosions = [];
         let csm;
 
-        let treeGrid = new Map();
+        let treeGridArr = [];
+        let treeGridDim = 0;
         const TREE_GRID_SIZE = 400;
 
         const maxSpeed = 2.2;
@@ -1376,11 +1409,17 @@
         let players = [];
 
         // --- MULTIPLAYER NETWORK LOOP ---
-        // Decoupled from requestAnimationFrame so tabbing out never drops the connection.
         setInterval(() => {
             if (!gameActive) return;
             const now = Date.now();
-            const me = players.find(p => p.index === myPlayerIndex);
+            
+            let me = null;
+            for (let i = 0; i < players.length; i++) {
+                if (players[i].index === myPlayerIndex) {
+                    me = players[i];
+                    break;
+                }
+            }
 
             if (!isHost && gameActive) {
                 if (lastGameStateTime > 0 && now - lastGameStateTime > 15000) {
@@ -1403,25 +1442,28 @@
             }
 
             if (isHost) {
-                // Garbage Collection: Detect players who closed the tab without gracefully leaving
-                players.forEach(p => {
+                for (let i = 0; i < players.length; i++) {
+                    const p = players[i];
                     if (!p.isLocal && !p.isAI && !p.disconnected && p.lastPacketTime && now - p.lastPacketTime > 10000) {
                         p.dispose();
-                        // Also purge them completely from the Lobby list so late joiners don't see them
-                        netPlayers = netPlayers.filter(np => np.id !== p.socketId);
+                        for (let j = netPlayers.length - 1; j >= 0; j--) {
+                            if (netPlayers[j].id === p.socketId) netPlayers.splice(j, 1);
+                        }
                         broadcastLobbyState();
                     }
-                });
+                }
                 
-                // Actively purge disconnected players from iterating loop to prevent memory leaks over long sessions
-                players = players.filter(p => !p.disconnected);
+                for (let i = players.length - 1; i >= 0; i--) {
+                    if (players[i].disconnected) players.splice(i, 1);
+                }
 
-                const stateSnapshot = players.map(p => {
+                const stateSnapshot = [];
+                for (let i = 0; i < players.length; i++) {
+                    const p = players[i];
                     let latestPos = p.mesh.position;
                     let latestQuat = p.mesh.quaternion;
                     let latestShoot = (p.index === myPlayerIndex || p.isAI ? p.isFiring : p.isShooting);
                     
-                    // Grab the raw received network state if available, avoiding double-interpolation broadcast delays
                     if (!p.isLocal && !p.isAI && p.positionBuffer && p.positionBuffer.length > 0) {
                         const latest = p.positionBuffer[p.positionBuffer.length - 1];
                         latestPos = latest.pos;
@@ -1429,7 +1471,7 @@
                         latestShoot = latest.shoot;
                     }
                     
-                    return {
+                    stateSnapshot.push({
                         idx: p.index, 
                         pos: latestPos,
                         quat: { x: latestQuat.x, y: latestQuat.y, z: latestQuat.z, w: latestQuat.w },
@@ -1437,8 +1479,8 @@
                         k: p.kills, d: p.deaths, killer: p.lastAttackerName,
                         shoot: latestShoot,
                         spawned: p.isLocal ? !introCinematicActive : p.isSpawned
-                    };
-                });
+                    });
+                }
 
                 socket.emit('host_broadcast', { roomCode: myRoomCode, data: { type: 'GAME_STATE', players: stateSnapshot } });
                 
@@ -1449,7 +1491,6 @@
             }
         }, NETWORK_TICK_RATE);
         
-        // Window blur event to stop active key loops from continuously firing over network if Alt-Tabbed
         window.addEventListener('blur', () => {
             inputState.pitchDown = false;
             inputState.pitchUp = false;
@@ -1460,7 +1501,13 @@
             inputState.shoot = false;
             inputState.lookBack = false;
             
-            const me = players.find(p => p.index === myPlayerIndex);
+            let me = null;
+            for (let i = 0; i < players.length; i++) {
+                if (players[i].index === myPlayerIndex) {
+                    me = players[i];
+                    break;
+                }
+            }
             if (me) {
                 me.inputs.pitch = 0;
                 me.inputs.roll = 0;
@@ -1558,11 +1605,8 @@
             if (biomeSelector > 0.05) {
                 let foothillTransition = smoothstep(0.05, 0.35, biomeSelector);
                 let mountainTransition = smoothstep(0.25, 0.6, biomeSelector);
-                
                 let baseTerrain = THREE.MathUtils.lerp(hills, foothills, foothillTransition);
-                
                 let easedMountainTransition = Math.pow(mountainTransition, 1.8);
-                
                 landHeight = THREE.MathUtils.lerp(baseTerrain, ridge, easedMountainTransition);
             } else if (biomeSelector < -0.15) {
                 let t = smoothstep(-0.15, -0.45, biomeSelector);
@@ -1576,10 +1620,8 @@
             let canyonNoise = Math.abs(simplex.noise(nx * 1.5 + 300, nz * 1.5 + 300));
             let canyonEdge = THREE.MathUtils.lerp(0.15, 0.45, smoothstep(200, 600, landHeight));
             let canyonMask = smoothstep(0.02, canyonEdge, canyonNoise);
-
             let canyonFade = smoothstep(300, 650, landHeight);
             canyonMask = THREE.MathUtils.lerp(canyonMask, 1.0, canyonFade);
-
             let canyonFloor = THREE.MathUtils.lerp(CONFIG.waterLevel - 20, 300, smoothstep(200, 800, landHeight));
 
             landHeight = THREE.MathUtils.lerp(canyonFloor, landHeight, canyonMask);
@@ -1592,7 +1634,6 @@
             return Math.max(CONFIG.waterLevel - 60, finalHeight);
         }
 
-        // --- PRECISE VISUAL TERRAIN HEIGHT CALCULATION ---
         let terrainGrid = null;
         const TERRAIN_CELL_SIZE = 200;
         let TERRAIN_GRID_DIM = 0;
@@ -1670,7 +1711,6 @@
             return getTerrainHeight(x, z);
         }
 
-        // --- SECURE SPAWN POINT GENERATION ---
         window.getSafeSpawn = function(minRadius = 1000, maxRadius = 3000) {
             let x = 0, z = 0, y = 800;
             let isSafe = false;
@@ -1683,20 +1723,15 @@
                 z = Math.cos(angle) * r;
                 const terrainY = getTerrainHeight(x, z);
                 
-                // Guarantee spawn height is well above the immediate terrain floor
                 y = Math.max(800, terrainY + 300); 
                 
                 let safeForward = true;
-                // Predict the player's initial flight path: They will spawn facing the origin (0, y, 0)
                 const dir = new THREE.Vector3(-x, 0, -z).normalize();
                 
-                // Ray-march 800 meters ahead of the spawn point to ensure we aren't immediately flying into a cliff face
                 for(let d = 100; d <= 800; d += 100) {
                     const checkX = x + dir.x * d;
                     const checkZ = z + dir.z * d;
                     const checkY = getTerrainHeight(checkX, checkZ);
-                    
-                    // If a mountain peak in front of us is higher than our spawn Y minus a small dip buffer, reject this spawn
                     if (checkY >= y - 100) { 
                         safeForward = false;
                         break;
@@ -1706,11 +1741,7 @@
                 if (safeForward) isSafe = true;
                 attempts++;
             }
-            
-            if (!isSafe) {
-                y = 1500; // Absolute fallback height to prevent immediate crash if grid is extremely chaotic
-            }
-            
+            if (!isSafe) { y = 1500; }
             return { x, y, z };
         };
 
@@ -1840,7 +1871,6 @@
         masterReverb.connect(reverbMix);
         reverbMix.connect(masterCompressor);
 
-        // --- UI Hook for Volume Control ---
         document.addEventListener("DOMContentLoaded", () => {
             const volSlider = document.getElementById('volume-slider');
             const volIcon = document.getElementById('volume-icon');
@@ -1915,7 +1945,6 @@
         const SoundGen = {
             playShoot: (pos) => {
                 const t = audioCtx.currentTime;
-                
                 const panner = audioCtx.createPanner();
                 panner.panningModel = 'HRTF';
                 panner.distanceModel = 'inverse';
@@ -1964,7 +1993,6 @@
             },
             playExplosion: (pos) => {
                 const t = audioCtx.currentTime;
-                
                 const panner = audioCtx.createPanner();
                 panner.panningModel = 'HRTF';
                 panner.distanceModel = 'inverse';
@@ -2003,7 +2031,6 @@
             },
             playBulletWaterHit: (pos) => {
                 const t = audioCtx.currentTime;
-                
                 const panner = audioCtx.createPanner();
                 panner.panningModel = 'HRTF';
                 panner.distanceModel = 'inverse';
@@ -2032,7 +2059,6 @@
             },
             playBulletDirtHit: (pos) => {
                 const t = audioCtx.currentTime;
-                
                 const panner = audioCtx.createPanner();
                 panner.panningModel = 'HRTF';
                 panner.distanceModel = 'inverse';
@@ -2089,16 +2115,12 @@
 
                 this.growlOsc = audioCtx.createOscillator();
                 this.growlOsc.type = 'sawtooth';
-
                 this.growlDistortion = audioCtx.createWaveShaper();
                 this.growlDistortion.curve = makeDistortionCurve(150);
-
                 this.growlFilter = audioCtx.createBiquadFilter();
                 this.growlFilter.type = 'lowpass';
                 this.growlFilter.Q.value = 1.0;
-
                 this.growlGain = audioCtx.createGain();
-
                 this.growlOsc.connect(this.growlDistortion);
                 this.growlDistortion.connect(this.growlFilter);
                 this.growlFilter.connect(this.growlGain);
@@ -2107,21 +2129,16 @@
                 this.propNoise = audioCtx.createBufferSource();
                 this.propNoise.buffer = noiseBufLoop;
                 this.propNoise.loop = true;
-
                 this.propFilter = audioCtx.createBiquadFilter();
                 this.propFilter.type = 'lowpass';
-
                 this.propGate = audioCtx.createGain();
                 this.propGain = audioCtx.createGain();
-
                 this.propLFO = audioCtx.createOscillator();
                 this.propLFO.type = 'sine';
-
                 this.propNoise.connect(this.propFilter);
                 this.propFilter.connect(this.propGate);
                 this.propGate.connect(this.propGain);
                 this.propGain.connect(this.gain);
-
                 this.propLFO.connect(this.propGate.gain);
 
                 this.whineOsc = audioCtx.createOscillator();
@@ -2136,7 +2153,6 @@
                 this.windFilter = audioCtx.createBiquadFilter();
                 this.windFilter.type = 'highpass';
                 this.windGain = audioCtx.createGain();
-
                 this.windNode.connect(this.windFilter);
                 this.windFilter.connect(this.windGain);
                 this.windGain.connect(this.gain);
@@ -2236,7 +2252,6 @@
                     hasConnectedOnce = true;
                 });
                 
-                // Disconnect Safety Catch (with bypass for intentional quitting)
                 socket.on('disconnect', () => {
                     if (gameActive && !window.isQuitting) {
                         showUIAlert("LOST CONNECTION TO SERVER. RETURNING TO MENU...", 4000);
@@ -2245,17 +2260,19 @@
                     }
                 });
 
-                // Catch-all server dropped connection handler
                 socket.on('player_disconnected', (playerId) => {
                     if (isHost) {
-                        netPlayers = netPlayers.filter(p => p.id !== playerId);
+                        for (let i = netPlayers.length - 1; i >= 0; i--) {
+                            if (netPlayers[i].id === playerId) netPlayers.splice(i, 1);
+                        }
                         if (!gameActive) {
                             updateLobbyUI();
                         } else {
-                            const p = players.find(pl => pl.socketId === playerId);
-                            if (p) {
-                                p.dispose();
+                            let p = null;
+                            for (let i = 0; i < players.length; i++) {
+                                if (players[i].socketId === playerId) { p = players[i]; break; }
                             }
+                            if (p) p.dispose();
                         }
                         broadcastLobbyState();
                     }
@@ -2265,7 +2282,6 @@
                     console.error('Server error:', msg);
                     showUIAlert(msg);
                     
-                    // Reset Join Button if we were waiting to join
                     const joinBtn = document.querySelector('button[onclick="joinGame()"]');
                     if (joinBtn && window.pendingJoinCode) {
                         joinBtn.innerText = "JOIN SQUADRON";
@@ -2273,7 +2289,6 @@
                         window.pendingJoinCode = null;
                     }
 
-                    // Fallback to cleanly kick user back to the menu if somehow trapped in waiting screen
                     if (document.getElementById('step-waiting').style.display === 'block' && netPlayers.length === 0) {
                         document.getElementById('step-waiting').style.display = 'none';
                         document.getElementById('step-menu').style.display = 'block';
@@ -2283,7 +2298,6 @@
 
                 socket.on('player_joined', (p) => {
                     if (isHost) {
-                        // Reject players entering with a duplicate name
                         const normalizedNewName = p.name.trim().toLowerCase();
                         const nameExists = netPlayers.some(np => np.name.trim().toLowerCase() === normalizedNewName);
                         
@@ -2306,7 +2320,6 @@
                         netPlayers.push({ id: p.id, name: p.name, index: newIdx });
                         broadcastLobbyState();
                         
-                        // Full Drop-In Support: Instantly inject late joiners directly into active missions
                         if (gameActive) {
                             socket.emit('host_broadcast', { roomCode: myRoomCode, data: { type: 'START_GAME' } });
                             const newP = new Player({id: p.id, name: p.name, index: newIdx}, false);
@@ -2366,7 +2379,6 @@
                         return;
                     }
                     if (packet.type === 'LOBBY_UPDATE') {
-                        // Check if we were actively waiting for a successful join confirmation before switching UIs
                         if (window.pendingJoinCode) {
                             myRoomCode = window.pendingJoinCode;
                             isHost = false;
@@ -2389,10 +2401,12 @@
                         if (!gameActive && !isGeneratingWorld) {
                             updateLobbyUI();
                         } else {
-                            // Mid-game drop-in OR user dropping in while our host is generating world.
-                            // Ensure existing clients safely dynamically spawn the new planes
                             netPlayers.forEach(np => {
-                                if (players && !players.find(p => p.index === np.index)) {
+                                let found = false;
+                                for (let i = 0; i < players.length; i++) {
+                                    if (players[i].index === np.index) { found = true; break; }
+                                }
+                                if (!found) {
                                     const newP = new Player(np, np.id === socket.id);
                                     if (newP.mesh) {
                                         newP.mesh.traverse(child => {
@@ -2406,16 +2420,21 @@
                                 }
                             });
                             
-                            // DISPOSE any players that have permanently left the session
-                            players.forEach(p => {
-                                if (!p.isLocal && !netPlayers.find(np => np.index === p.index)) {
-                                    p.dispose();
+                            for (let i = 0; i < players.length; i++) {
+                                let p = players[i];
+                                let found = false;
+                                for (let j = 0; j < netPlayers.length; j++) {
+                                    if (netPlayers[j].index === p.index) { found = true; break; }
                                 }
-                            });
+                                if (!p.isLocal && !found) p.dispose();
+                            }
                         }
 
                         if (!isHost) {
-                            const me = netPlayers.find(p => p.id === socket.id);
+                            let me = null;
+                            for (let i = 0; i < netPlayers.length; i++) {
+                                if (netPlayers[i].id === socket.id) { me = netPlayers[i]; break; }
+                            }
                             if (me) myPlayerIndex = me.index;
                         }
                     } else if (packet.type === 'START_GAME') {
@@ -2436,7 +2455,10 @@
                         if (gameActive) handleGameState(packet);
                     } else if (packet.type === 'HIT_EVENT') {
                         if (gameActive && !isHost) { 
-                            const target = players.find(p => p.index === packet.targetIdx);
+                            let target = null;
+                            for (let i = 0; i < players.length; i++) {
+                                if (players[i].index === packet.targetIdx) { target = players[i]; break; }
+                            }
                             if (target && target.index === myPlayerIndex) {
                                 target.takeDamage(packet.dmg, packet.attackerIdx);
                             }
@@ -2447,21 +2469,29 @@
                 socket.on('player_data', (packet) => {
                     if (isHost) {
                         if (packet.data.type === 'PLAYER_LEFT') {
-                            netPlayers = netPlayers.filter(p => p.id !== packet.data.id && p.index !== packet.data.idx);
+                            for (let i = netPlayers.length - 1; i >= 0; i--) {
+                                if (netPlayers[i].id === packet.data.id && netPlayers[i].index === packet.data.idx) {
+                                    netPlayers.splice(i, 1);
+                                }
+                            }
                             if (!gameActive) {
                                 updateLobbyUI();
                             } else {
-                                const p = players.find(pl => pl.index === packet.data.idx);
-                                if (p) {
-                                    p.dispose();
+                                let p = null;
+                                for (let i = 0; i < players.length; i++) {
+                                    if (players[i].index === packet.data.idx) { p = players[i]; break; }
                                 }
+                                if (p) p.dispose();
                             }
                             broadcastLobbyState();
                             return;
                         }
 
                         if (gameActive) {
-                            const p = players.find(pl => pl.index === packet.data.idx);
+                            let p = null;
+                            for (let i = 0; i < players.length; i++) {
+                                if (players[i].index === packet.data.idx) { p = players[i]; break; }
+                            }
                             if (p) p.lastPacketTime = Date.now();
 
                             if (packet.data.type === 'PLAYER_DIED') {
@@ -2469,7 +2499,10 @@
                                 if (victim) {
                                     victim.deaths++;
                                     if (packet.data.attackerIdx !== null && packet.data.attackerIdx !== -1) {
-                                        const attacker = players.find(pa => pa.index === packet.data.attackerIdx);
+                                        let attacker = null;
+                                        for (let i = 0; i < players.length; i++) {
+                                            if (players[i].index === packet.data.attackerIdx) { attacker = players[i]; break; }
+                                        }
                                         if (attacker && attacker.index !== victim.index) {
                                             attacker.kills++;
                                         }
@@ -2480,7 +2513,10 @@
 
                             if (packet.data.type === 'HIT_EVENT') {
                                 socket.emit('host_broadcast', { roomCode: myRoomCode, data: packet.data });
-                                const target = players.find(pl => pl.index === packet.data.targetIdx);
+                                let target = null;
+                                for (let i = 0; i < players.length; i++) {
+                                    if (players[i].index === packet.data.targetIdx) { target = players[i]; break; }
+                                }
                                 if (target && (target.index === myPlayerIndex || target.isAI)) {
                                     target.takeDamage(packet.data.dmg, packet.data.attackerIdx);
                                 }
@@ -2514,7 +2550,6 @@
                 } else {
                     socket.emit('client_send', { roomCode: myRoomCode, data: { type: 'PLAYER_LEFT', idx: myPlayerIndex, id: socket.id } });
                 }
-                // Yield thread to allow packet buffer flush before socket disconnection
                 setTimeout(() => {
                     if (socket) socket.disconnect();
                     completeLeave();
@@ -2538,14 +2573,12 @@
 
         window.quitGame = function() {
             window.isQuitting = true;
-            // Send explicit disconnect payload to gracefully unbind connection before reloading
             if (socket && socket.connected) {
                 if (isHost) {
                     socket.emit('host_broadcast', { roomCode: myRoomCode, data: { type: 'HOST_LEFT' } });
                 } else {
                     socket.emit('client_send', { roomCode: myRoomCode, data: { type: 'PLAYER_LEFT', idx: myPlayerIndex, id: socket.id } });
                 }
-                // Yield thread to allow packet buffer flush before socket disconnection
                 setTimeout(() => {
                     if (socket) socket.disconnect();
                     completeQuit();
@@ -2556,14 +2589,12 @@
         };
 
         function completeQuit() {
-            // Use sessionStorage to temporarily store your username and securely reload the page back to the menu
             sessionStorage.setItem('returnToMenu', 'true');
             sessionStorage.setItem('username', myUsername);
             window.location.reload();
         }
 
         window.hostGame = function () {
-            // Custom character set that explicitly excludes confusing letters O, I, L and numbers 0, 1
             const chars = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
             let code = '';
             for (let i = 0; i < 4; i++) {
@@ -2594,7 +2625,6 @@
             if (!code) { showUIAlert("NO ROOM CODE ENTERED!"); return; }
             if (code.length !== 4) { showUIAlert("ROOM CODE MUST BE 4 CHARACTERS"); return; }
             
-            // Set flag to wait for LOBBY_UPDATE confirmation before switching UI to avoid rubberbanding
             window.pendingJoinCode = code;
             
             const joinBtn = document.querySelector('button[onclick="joinGame()"]');
@@ -2668,9 +2698,14 @@
             if (!isHost) return;
             
             if (isAI) {
-                netPlayers = netPlayers.filter(np => np.id !== id);
+                for (let i = netPlayers.length - 1; i >= 0; i--) {
+                    if (netPlayers[i].id === id) netPlayers.splice(i, 1);
+                }
                 if (gameActive) {
-                    const p = players.find(pl => pl.index === index);
+                    let p = null;
+                    for (let i = 0; i < players.length; i++) {
+                        if (players[i].index === index) { p = players[i]; break; }
+                    }
                     if (p) p.dispose();
                 } else {
                     updateLobbyUI();
@@ -2685,9 +2720,14 @@
                     }
                 });
                 
-                netPlayers = netPlayers.filter(np => np.id !== id);
+                for (let i = netPlayers.length - 1; i >= 0; i--) {
+                    if (netPlayers[i].id === id) netPlayers.splice(i, 1);
+                }
                 if (gameActive) {
-                    const p = players.find(pl => pl.socketId === id);
+                    let p = null;
+                    for (let i = 0; i < players.length; i++) {
+                        if (players[i].socketId === id) { p = players[i]; break; }
+                    }
                     if (p) p.dispose();
                 } else {
                     updateLobbyUI();
@@ -2697,7 +2737,6 @@
         };
 
         function updateLobbyUI() {
-            // Update start button and waiting message visibility dynamically based on current host status
             const startBtn = document.getElementById('start-btn');
             const addAiBtn = document.getElementById('add-ai-btn');
             const waitingMsg = document.getElementById('waiting-msg');
@@ -2753,7 +2792,6 @@
                 if (p.id === socket.id) leftSide.style.color = "#00ff00"; 
                 div.appendChild(leftSide);
 
-                // Host Kick Button Implementation
                 if (isHost && p.id !== socket.id) {
                     const kickBtn = document.createElement('button');
                     kickBtn.className = 'kick-btn';
@@ -2765,7 +2803,7 @@
                     kickBtn.style.border = '1px solid #ff4444';
                     kickBtn.style.color = '#ff4444';
                     kickBtn.style.cursor = 'pointer';
-                    kickBtn.style.textDecoration = 'none'; // explicitly override any strikethrough logic
+                    kickBtn.style.textDecoration = 'none'; 
                     kickBtn.onmouseover = () => { kickBtn.style.background = '#ff4444'; kickBtn.style.color = '#000'; };
                     kickBtn.onmouseout = () => { kickBtn.style.background = 'transparent'; kickBtn.style.color = '#ff4444'; };
                     kickBtn.onclick = (e) => {
@@ -2786,42 +2824,83 @@
             });
         }
 
+        // --- PARTICLE POOLING SYSTEM ---
+        class ParticlePool {
+            constructor(geometry, maxSize) {
+                this.items = [];
+                for (let i = 0; i < maxSize; i++) {
+                    const mat = new THREE.MeshBasicMaterial({ transparent: true });
+                    const mesh = new THREE.Mesh(geometry, mat);
+                    mesh.visible = false;
+                    mesh.userData.velocity = new THREE.Vector3();
+                    mesh.userData.rotSpeed = 0;
+                    mesh.userData.life = 0;
+                    mesh.userData.baseOpacity = 1;
+                    mesh.userData.isFlame = false;
+                    mesh.userData.isWater = false;
+                    this.items.push({ mesh, active: false });
+                }
+            }
+            get() {
+                for (let i = 0; i < this.items.length; i++) {
+                    if (!this.items[i].active) {
+                        this.items[i].active = true;
+                        return this.items[i].mesh;
+                    }
+                }
+                return null;
+            }
+            release(mesh) {
+                mesh.visible = false;
+                const item = this.items.find(x => x.mesh === mesh);
+                if (item) item.active = false;
+            }
+        }
+        
+        let boxParticlePool;
+        let sphereParticlePool;
+
         class Explosion {
             constructor(position, color) {
                 this.particles = [];
                 const particleCount = 12;
-                const material = new THREE.MeshBasicMaterial({ color: color });
                 for (let i = 0; i < particleCount; i++) {
-                    const mesh = new THREE.Mesh(sharedExplosionGeo, material);
+                    const mesh = boxParticlePool.get();
+                    if (!mesh) continue;
+                    mesh.material.color.setHex(color);
+                    mesh.material.opacity = 1.0;
                     mesh.position.copy(position);
-                    mesh.velocity = new THREE.Vector3(
+                    mesh.userData.velocity.set(
                         (Math.random() - 0.5) * 2,
                         (Math.random() - 0.5) * 2,
                         (Math.random() - 0.5) * 2
                     );
-                    mesh.life = 1.0;
-                    mesh.rotSpeed = (Math.random() - 0.5) * 0.2;
-                    scene.add(mesh);
+                    mesh.userData.life = 1.0;
+                    mesh.userData.rotSpeed = (Math.random() - 0.5) * 0.2;
+                    mesh.visible = true;
                     this.particles.push(mesh);
                 }
             }
             update(timeScale) {
                 let active = false;
-                for (let p of this.particles) {
-                    if (p.life > 0) {
-                        p.position.addScaledVector(p.velocity, timeScale);
-                        p.rotation.x += p.rotSpeed * timeScale;
-                        p.life -= 0.03 * timeScale;
-                        p.scale.setScalar(p.life * 3);
+                for (let i = 0; i < this.particles.length; i++) {
+                    let p = this.particles[i];
+                    if (p.userData.life > 0) {
+                        p.position.addScaledVector(p.userData.velocity, timeScale);
+                        p.rotation.x += p.userData.rotSpeed * timeScale;
+                        p.userData.life -= 0.03 * timeScale;
+                        p.scale.setScalar(p.userData.life * 3);
                         active = true;
-                    } else { p.visible = false; }
+                    } else if (p.visible) { 
+                        boxParticlePool.release(p); 
+                    }
                 }
                 return active;
             }
             dispose() {
-                if (this.particles.length > 0) this.particles[0].material.dispose();
-                for (let p of this.particles) {
-                    scene.remove(p);
+                for (let i = 0; i < this.particles.length; i++) {
+                    let p = this.particles[i];
+                    if (p.visible) boxParticlePool.release(p);
                 }
             }
         }
@@ -2830,42 +2909,46 @@
             constructor(position) {
                 this.particles = [];
                 const particleCount = 8;
-                const material = new THREE.MeshBasicMaterial({ color: 0xddffff, transparent: true, opacity: 0.8 });
                 for (let i = 0; i < particleCount; i++) {
-                    const mesh = new THREE.Mesh(sharedExplosionGeo, material);
+                    const mesh = boxParticlePool.get();
+                    if (!mesh) continue;
+                    mesh.material.color.setHex(0xddffff);
+                    mesh.material.opacity = 0.8;
                     mesh.position.copy(position);
-                    // Lock splash exactly at water level
                     mesh.position.y = CONFIG.waterLevel;
-                    mesh.velocity = new THREE.Vector3(
+                    mesh.userData.velocity.set(
                         (Math.random() - 0.5) * 2.0,
                         1.0 + Math.random() * 2.0,
                         (Math.random() - 0.5) * 2.0
                     );
-                    mesh.life = 1.0;
-                    mesh.rotSpeed = (Math.random() - 0.5) * 0.4;
-                    scene.add(mesh);
+                    mesh.userData.life = 1.0;
+                    mesh.userData.rotSpeed = (Math.random() - 0.5) * 0.4;
+                    mesh.visible = true;
                     this.particles.push(mesh);
                 }
             }
             update(timeScale) {
                 let active = false;
-                for (let p of this.particles) {
-                    if (p.life > 0) {
-                        p.velocity.y -= 0.15 * timeScale; // Gravity
-                        p.position.addScaledVector(p.velocity, timeScale);
-                        p.rotation.x += p.rotSpeed * timeScale;
-                        p.life -= 0.04 * timeScale;
-                        p.scale.setScalar(p.life * 1.5);
-                        p.material.opacity = p.life * 0.8;
+                for (let i = 0; i < this.particles.length; i++) {
+                    let p = this.particles[i];
+                    if (p.userData.life > 0) {
+                        p.userData.velocity.y -= 0.15 * timeScale; 
+                        p.position.addScaledVector(p.userData.velocity, timeScale);
+                        p.rotation.x += p.userData.rotSpeed * timeScale;
+                        p.userData.life -= 0.04 * timeScale;
+                        p.scale.setScalar(p.userData.life * 1.5);
+                        p.material.opacity = p.userData.life * 0.8;
                         active = true;
-                    } else { p.visible = false; }
+                    } else if (p.visible) { 
+                        boxParticlePool.release(p); 
+                    }
                 }
                 return active;
             }
             dispose() {
-                if (this.particles.length > 0) this.particles[0].material.dispose();
-                for (let p of this.particles) {
-                    scene.remove(p);
+                for (let i = 0; i < this.particles.length; i++) {
+                    let p = this.particles[i];
+                    if (p.visible) boxParticlePool.release(p);
                 }
             }
         }
@@ -2874,44 +2957,51 @@
             constructor(position) {
                 this.particles = [];
                 const particleCount = 6;
-                const material = new THREE.MeshBasicMaterial({ color: 0x4a3525, transparent: true, opacity: 1.0 });
                 for (let i = 0; i < particleCount; i++) {
-                    const mesh = new THREE.Mesh(sharedExplosionGeo, material);
+                    const mesh = boxParticlePool.get();
+                    if (!mesh) continue;
+                    mesh.material.color.setHex(0x4a3525);
+                    mesh.material.opacity = 1.0;
                     mesh.position.copy(position);
-                    mesh.velocity = new THREE.Vector3(
+                    mesh.userData.velocity.set(
                         (Math.random() - 0.5) * 1.5,
                         0.5 + Math.random() * 1.5,
                         (Math.random() - 0.5) * 1.5
                     );
-                    mesh.life = 1.0;
-                    mesh.rotSpeed = (Math.random() - 0.5) * 0.4;
-                    scene.add(mesh);
+                    mesh.userData.life = 1.0;
+                    mesh.userData.rotSpeed = (Math.random() - 0.5) * 0.4;
+                    mesh.visible = true;
                     this.particles.push(mesh);
                 }
             }
             update(timeScale) {
                 let active = false;
-                for (let p of this.particles) {
-                    if (p.life > 0) {
-                        p.velocity.y -= 0.08 * timeScale; 
-                        p.position.addScaledVector(p.velocity, timeScale);
-                        p.rotation.x += p.rotSpeed * timeScale;
-                        p.life -= 0.05 * timeScale;
-                        p.scale.setScalar(p.life * 2.0);
-                        p.material.opacity = p.life;
+                for (let i = 0; i < this.particles.length; i++) {
+                    let p = this.particles[i];
+                    if (p.userData.life > 0) {
+                        p.userData.velocity.y -= 0.08 * timeScale; 
+                        p.position.addScaledVector(p.userData.velocity, timeScale);
+                        p.rotation.x += p.userData.rotSpeed * timeScale;
+                        p.userData.life -= 0.05 * timeScale;
+                        p.scale.setScalar(p.userData.life * 2.0);
+                        p.material.opacity = p.userData.life;
                         active = true;
-                    } else { p.visible = false; }
+                    } else if (p.visible) { 
+                        boxParticlePool.release(p); 
+                    }
                 }
                 return active;
             }
             dispose() {
-                if (this.particles.length > 0) this.particles[0].material.dispose();
-                for (let p of this.particles) {
-                    scene.remove(p);
+                for (let i = 0; i < this.particles.length; i++) {
+                    let p = this.particles[i];
+                    if (p.visible) boxParticlePool.release(p);
                 }
             }
         }
 
+        const _sharedProjGeo = new THREE.BoxGeometry(0.3, 0.3, 4);
+        const _sharedProjMat = new THREE.MeshBasicMaterial({ color: 0xffffaa });
         class Projectile {
             constructor() {
                 this.isActive = false;
@@ -2919,13 +3009,11 @@
                 this.speed = 0;
                 this.life = 0;
                 this.hitType = null;
-                const geo = new THREE.BoxGeometry(0.3, 0.3, 4);
-                const mat = new THREE.MeshBasicMaterial({ color: 0xffffaa });
-                this.mesh = new THREE.Mesh(geo, mat);
+                this.isLocalOrHostAI = false;
+                this.mesh = new THREE.Mesh(_sharedProjGeo, _sharedProjMat);
                 this.mesh.visible = false;
-                scene.add(this.mesh);
             }
-            activate(ownerIdx, position, quaternion, speed) {
+            activate(ownerIdx, position, quaternion, speed, isLocalOrHostAI) {
                 this.ownerIdx = ownerIdx;
                 this.speed = speed + 15.0;
                 this.life = 100;
@@ -2934,6 +3022,7 @@
                 this.mesh.quaternion.copy(quaternion);
                 this.mesh.visible = true;
                 this.isActive = true;
+                this.isLocalOrHostAI = isLocalOrHostAI;
             }
             update(timeScale) {
                 if (!this.isActive) return false;
@@ -2958,8 +3047,15 @@
             }
         }
 
-        // Shared Geometry to optimize Vortex instantiation in the particle loop
-        const sharedVortexGeo = new THREE.IcosahedronGeometry(0.35, 0);
+        function getProjectile() {
+            for (let i = 0; i < MAX_PROJECTILES; i++) {
+                _lastProjIdx = (_lastProjIdx + 1) % MAX_PROJECTILES;
+                if (!projectilePool[_lastProjIdx].isActive) {
+                    return projectilePool[_lastProjIdx];
+                }
+            }
+            return null;
+        }
 
         class Player {
             constructor(config, isLocal) {
@@ -2984,10 +3080,9 @@
                 this.trailParticles = [];
                 this.lastShot = 0;
                 
-                // Weapon Cooldown & Magazine Variables
                 this.maxAmmo = 67;
                 this.currentAmmo = this.maxAmmo;
-                this.reloadTime = 25000; // 25 Seconds
+                this.reloadTime = 25000; 
                 this.isReloading = false;
                 this.reloadTimerStart = 0;
 
@@ -3028,6 +3123,7 @@
 
                 this.radarBlip = document.createElement('div');
                 this.radarBlip.className = 'radar-blip';
+                this.radarBlipStyle = this.radarBlip.style;
                 if (this.index !== myPlayerIndex) {
                     document.getElementById('radar').appendChild(this.radarBlip);
                 }
@@ -3055,7 +3151,6 @@
                     color: color, roughness: 0.5, metalness: 0.2, flatShading: true
                 });
                 
-                // Made glass slightly more transparent (opacity: 0.4)
                 const glassMat = new THREE.MeshStandardMaterial({
                     color: 0x111111, metalness: 0.9, roughness: 0.05, transparent: true, opacity: 0.4, flatShading: true
                 });
@@ -3103,7 +3198,6 @@
                 leftTip.position.set(0.8, -0.2, -1);
                 leftTip.rotation.x = -0.05; leftTip.rotation.y = -0.2;
 
-                // Add spatial tracking anchors explicitly for wingtip vortices
                 this.leftAnchor = new THREE.Object3D();
                 this.leftAnchor.position.set(7.5, 0, 0.5);
                 leftTip.add(this.leftAnchor);
@@ -3116,7 +3210,6 @@
                 rightTip.position.set(-0.8, -0.2, -1);
                 rightTip.rotation.x = -0.05; rightTip.rotation.y = 0.2; rightTip.scale.x = -1;
 
-                // Add spatial tracking anchor explicitly for right wingtip vortex
                 this.rightAnchor = new THREE.Object3D();
                 this.rightAnchor.position.set(7.5, 0, 0.5);
                 rightTip.add(this.rightAnchor);
@@ -3167,15 +3260,16 @@
                 this.propeller.position.set(0, 0, -9.1);
                 planeGroup.add(this.propeller);
 
+                // Initialize muzzle flash to be permanently visible to avoid active-light-count shader recompilation.
                 const flashGeo = new THREE.DodecahedronGeometry(0.8, 0);
-                const flashMat = new THREE.MeshBasicMaterial({ color: 0xffff00, transparent: true, opacity: 0.8 });
+                const flashMat = new THREE.MeshBasicMaterial({ color: 0xffff00, transparent: true, opacity: 0.0, depthWrite: false });
                 this.muzzleFlash = new THREE.Mesh(flashGeo, flashMat);
                 this.muzzleFlash.position.set(0, 0, -10.5);
                 
-                const flashLight = new THREE.PointLight(0xffdd66, 150, 40);
-                this.muzzleFlash.add(flashLight);
+                this.muzzleFlashLight = new THREE.PointLight(0xffdd66, 0, 40);
+                this.muzzleFlash.add(this.muzzleFlashLight);
                 
-                this.muzzleFlash.visible = false;
+                this.muzzleFlash.visible = true; 
                 planeGroup.add(this.muzzleFlash);
 
                 planeGroup.traverse(child => {
@@ -3189,85 +3283,94 @@
             }
 
             createTrail(color = 0xdddddd, size = 0.5, opacity = 0.4, offset = new THREE.Vector3(0, 0, 6.5), isFlame = false) {
-                const geo = new THREE.IcosahedronGeometry(size, 0);
-                const mat = new THREE.MeshBasicMaterial({ color: color, transparent: true, opacity: opacity });
-                const mesh = new THREE.Mesh(geo, mat);
-                const pos = offset.clone().applyMatrix4(this.mesh.matrixWorld);
-                mesh.position.copy(pos);
-                scene.add(mesh);
+                const mesh = sphereParticlePool.get();
+                if (!mesh) return;
                 
-                let vel;
+                mesh.material.color.setHex(color);
+                mesh.material.opacity = opacity;
+                mesh.scale.setScalar(size);
+                
+                _tempVec.copy(offset).applyMatrix4(this.mesh.matrixWorld);
+                mesh.position.copy(_tempVec);
+                
                 if (isFlame) {
-                    vel = new THREE.Vector3((Math.random() - 0.5)*1.5, (Math.random() - 0.5)*1.5, (Math.random() - 0.5)*1.5).multiplyScalar(0.5);
+                    mesh.userData.velocity.set((Math.random() - 0.5)*1.5, (Math.random() - 0.5)*1.5, (Math.random() - 0.5)*1.5).multiplyScalar(0.5);
                 } else {
-                    vel = new THREE.Vector3((Math.random() - 0.5), (Math.random() - 0.5), (Math.random() - 0.5)).multiplyScalar(0.2);
+                    mesh.userData.velocity.set((Math.random() - 0.5), (Math.random() - 0.5), (Math.random() - 0.5)).multiplyScalar(0.2);
                 }
                 
-                this.trailParticles.push({
-                    mesh: mesh, life: 1.0, baseOpacity: opacity,
-                    velocity: vel,
-                    isFlame: isFlame
-                });
+                mesh.userData.life = 1.0;
+                mesh.userData.baseOpacity = opacity;
+                mesh.userData.isFlame = isFlame;
+                mesh.userData.isWater = false;
+                mesh.visible = true;
+                this.trailParticles.push(mesh);
             }
 
             createVortex(opacity = 0.3) {
                 if (!this.leftAnchor || !this.rightAnchor) return;
                 
-                // Create Left Vortex Particle
-                const geoL = new THREE.IcosahedronGeometry(0.35, 0);
-                const matL = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: opacity });
-                const meshL = new THREE.Mesh(geoL, matL);
-                const posL = new THREE.Vector3().setFromMatrixPosition(this.leftAnchor.matrixWorld);
-                meshL.position.copy(posL);
-                scene.add(meshL);
-                
-                // Append directly to the standard trail array for seamless cleanup lifecycle
-                this.trailParticles.push({
-                    mesh: meshL, life: 1.0, baseOpacity: opacity,
-                    velocity: new THREE.Vector3((Math.random() - 0.5)*0.1, (Math.random() - 0.5)*0.1, (Math.random() - 0.5)*0.1)
-                });
+                const meshL = sphereParticlePool.get();
+                if (meshL) {
+                    meshL.material.color.setHex(0xffffff);
+                    meshL.material.opacity = opacity;
+                    meshL.scale.setScalar(0.35);
+                    _tempVec.setFromMatrixPosition(this.leftAnchor.matrixWorld);
+                    meshL.position.copy(_tempVec);
+                    meshL.userData.velocity.set((Math.random() - 0.5)*0.1, (Math.random() - 0.5)*0.1, (Math.random() - 0.5)*0.1);
+                    meshL.userData.life = 1.0;
+                    meshL.userData.baseOpacity = opacity;
+                    meshL.userData.isFlame = false;
+                    meshL.userData.isWater = false;
+                    meshL.visible = true;
+                    this.trailParticles.push(meshL);
+                }
 
-                // Create Right Vortex Particle
-                const geoR = new THREE.IcosahedronGeometry(0.35, 0);
-                const matR = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: opacity });
-                const meshR = new THREE.Mesh(geoR, matR);
-                const posR = new THREE.Vector3().setFromMatrixPosition(this.rightAnchor.matrixWorld);
-                meshR.position.copy(posR);
-                scene.add(meshR);
-                
-                this.trailParticles.push({
-                    mesh: meshR, life: 1.0, baseOpacity: opacity,
-                    velocity: new THREE.Vector3((Math.random() - 0.5)*0.1, (Math.random() - 0.5)*0.1, (Math.random() - 0.5)*0.1)
-                });
+                const meshR = sphereParticlePool.get();
+                if (meshR) {
+                    meshR.material.color.setHex(0xffffff);
+                    meshR.material.opacity = opacity;
+                    meshR.scale.setScalar(0.35);
+                    _tempVec.setFromMatrixPosition(this.rightAnchor.matrixWorld);
+                    meshR.position.copy(_tempVec);
+                    meshR.userData.velocity.set((Math.random() - 0.5)*0.1, (Math.random() - 0.5)*0.1, (Math.random() - 0.5)*0.1);
+                    meshR.userData.life = 1.0;
+                    meshR.userData.baseOpacity = opacity;
+                    meshR.userData.isFlame = false;
+                    meshR.userData.isWater = false;
+                    meshR.visible = true;
+                    this.trailParticles.push(meshR);
+                }
             }
 
             createWaterSpray(opacity = 0.5) {
+                const mesh = sphereParticlePool.get();
+                if (!mesh) return;
+                
                 const size = 0.8 + Math.random() * 1.2;
-                const geo = new THREE.IcosahedronGeometry(size, 0);
-                const mat = new THREE.MeshBasicMaterial({ color: 0xddffff, transparent: true, opacity: opacity });
-                const mesh = new THREE.Mesh(geo, mat);
+                mesh.material.color.setHex(0xddffff);
+                mesh.material.opacity = opacity;
+                mesh.scale.setScalar(size);
                 
-                // Spawn position: horizontally behind the plane, vertically locked exactly at the water level
-                const backVec = new THREE.Vector3(0, 0, 4).applyQuaternion(this.mesh.quaternion);
-                const pos = this.mesh.position.clone().add(backVec);
-                pos.y = CONFIG.waterLevel;
-                mesh.position.copy(pos);
-                scene.add(mesh);
+                _tempVec.set(0, 0, 4).applyQuaternion(this.mesh.quaternion);
+                mesh.position.copy(this.mesh.position).add(_tempVec);
+                mesh.position.y = CONFIG.waterLevel;
                 
-                // Velocity: mostly upwards, slight random spread, inherited forward momentum
-                const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(this.mesh.quaternion);
-                const vel = new THREE.Vector3(
+                _tempVec.set(0, 0, -1).applyQuaternion(this.mesh.quaternion);
+                mesh.userData.velocity.set(
                     (Math.random() - 0.5) * 1.5,
                     1.5 + Math.random() * 2.5, 
                     (Math.random() - 0.5) * 1.5
                 );
-                vel.addScaledVector(forward, this.speed * 0.2);
-
-                this.trailParticles.push({
-                    mesh: mesh, life: 1.0, baseOpacity: opacity,
-                    velocity: vel,
-                    isWater: true
-                });
+                mesh.userData.velocity.addScaledVector(_tempVec, this.speed * 0.2);
+                
+                mesh.userData.life = 1.0;
+                mesh.userData.baseOpacity = opacity;
+                mesh.userData.isFlame = false;
+                mesh.userData.isWater = true;
+                mesh.visible = true;
+                
+                this.trailParticles.push(mesh);
             }
 
             explode() {
@@ -3275,7 +3378,7 @@
                 this.isCrashed = true;
                 this.speed = 0;
                 this.mesh.visible = false;
-                if (this.radarBlip) this.radarBlip.style.display = 'none';
+                if (this.radarBlipStyle) this.radarBlipStyle.display = 'none';
                 this.engineSound.stop();
                 SoundGen.playExplosion(this.mesh.position);
                 explosions.push(new Explosion(this.mesh.position, 0xff0000));
@@ -3309,7 +3412,10 @@
                 this.deaths++;
                 let killerName = null;
                 if (attackerIdx !== null && attackerIdx !== -1) {
-                    const attacker = players.find(p => p.index === attackerIdx);
+                    let attacker = null;
+                    for (let i = 0; i < players.length; i++) {
+                        if (players[i].index === attackerIdx) { attacker = players[i]; break; }
+                    }
                     if (attacker) killerName = attacker.name;
                 }
 
@@ -3320,7 +3426,10 @@
 
                 if (isHost) {
                     if (attackerIdx !== null && attackerIdx !== -1) {
-                        const attacker = players.find(p => p.index === attackerIdx);
+                        let attacker = null;
+                        for (let i = 0; i < players.length; i++) {
+                            if (players[i].index === attackerIdx) { attacker = players[i]; break; }
+                        }
                         if (attacker && attacker.index !== this.index) attacker.kills++;
                     }
                     socket.emit('host_broadcast', { roomCode: myRoomCode, data: deathData });
@@ -3348,14 +3457,17 @@
                 this.isCrashed = false;
                 this.lastAttackerName = null;
                 this.mesh.visible = true;
-                if (this.radarBlip) this.radarBlip.style.display = 'block';
+                if (this.radarBlipStyle) this.radarBlipStyle.display = 'block';
                 this.engineSound.restart();
                 this.positionBuffer = [];
                 this.hasInitialSnap = false;
                 this.lastRespawnTime = Date.now();
                 this.respawnTimer = 0;
                 this.flashTimer = 0;
-                if (this.muzzleFlash) this.muzzleFlash.visible = false;
+                if (this.muzzleFlash) {
+                    this.muzzleFlash.material.opacity = 0;
+                    this.muzzleFlashLight.intensity = 0;
+                }
 
                 if (this.index === myPlayerIndex) document.getElementById('crash-msg').style.display = 'none';
             }
@@ -3372,7 +3484,6 @@
                 let effThrottle = this.inputs.throttle;
                 let effShoot = this.inputs.shoot;
 
-                // Mask user controls during cinematic transition
                 if (this.isLocal && typeof introCinematicActive !== 'undefined' && introCinematicActive) {
                     effPitch = 0;
                     effRoll = 0;
@@ -3422,7 +3533,6 @@
 
                 const now = Date.now();
                 
-                // Weapon logic and Reloading processing
                 if (this.isReloading) {
                     if (now - this.reloadTimerStart >= this.reloadTime) {
                         this.isReloading = false;
@@ -3441,19 +3551,19 @@
                     }
 
                     _tempVec.set(0, 0, -4).applyMatrix4(this.mesh.matrixWorld);
-                    const p = projectilePool.find(proj => !proj.isActive);
+                    const p = getProjectile();
                     if (p) {
-                        p.activate(this.index, _tempVec, this.mesh.quaternion, this.speed);
+                        p.activate(this.index, _tempVec, this.mesh.quaternion, this.speed, this.isLocal || (isHost && this.isAI));
                         this.flashTimer = 0.1;
                         if (this.muzzleFlash) {
-                            this.muzzleFlash.visible = true;
+                            this.muzzleFlash.material.opacity = 0.8;
+                            this.muzzleFlashLight.intensity = 150;
                             this.muzzleFlash.rotation.z = Math.random() * Math.PI;
                         }
                         SoundGen.playShoot(this.mesh.position);
                     }
                 }
 
-                // Utilize exact visual geometry interpolator for precise collision against terrain
                 const tH = getVisualTerrainHeight(this.mesh.position.x, this.mesh.position.z);
                 let hitEnvironment = false;
 
@@ -3461,19 +3571,22 @@
                     hitEnvironment = true;
                 }
 
-                if (!hitEnvironment) {
-                    const gx = Math.floor(this.mesh.position.x / TREE_GRID_SIZE);
-                    const gz = Math.floor(this.mesh.position.z / TREE_GRID_SIZE);
+                if (!hitEnvironment && treeGridDim > 0) {
+                    const gx = Math.floor((this.mesh.position.x + CONFIG.width / 2) / TREE_GRID_SIZE);
+                    const gz = Math.floor((this.mesh.position.z + CONFIG.width / 2) / TREE_GRID_SIZE);
 
                     for (let ox = -1; ox <= 1; ox++) {
                         for (let oz = -1; oz <= 1; oz++) {
-                            const cell = treeGrid.get((gx + ox) + "," + (gz + oz));
-                            if (cell) {
-                                for (const t of cell) {
+                            const cx = gx + ox;
+                            const cz = gz + oz;
+                            if (cx >= 0 && cx < treeGridDim && cz >= 0 && cz < treeGridDim) {
+                                const cell = treeGridArr[cz * treeGridDim + cx];
+                                for (let j = 0; j < cell.length; j++) {
+                                    const t = cell[j];
                                     if (this.mesh.position.y < t.y + t.h && this.mesh.position.y > t.y) {
                                         const dx = this.mesh.position.x - t.x;
                                         const dz = this.mesh.position.z - t.z;
-                                        if (dx * dx + dz * dz < (t.r + 4) ** 2) {
+                                        if (dx * dx + dz * dz < t.rSq) {
                                             hitEnvironment = true;
                                             break;
                                         }
@@ -3510,7 +3623,6 @@
                 this.hp = data.hp;
 
                 if (data.pos && data.quat) {
-                    // Prevent interpolation NaN failures from packets arriving simultaneously by strictly enforcing monotonic receipt times
                     let rTime = Date.now();
                     if (this.positionBuffer.length > 0) {
                         const lastT = this.positionBuffer[this.positionBuffer.length - 1].timestamp;
@@ -3597,7 +3709,6 @@
                         this.hasInitialSnap = true;
                     } else {
                         this.isShooting = snap.shoot;
-                        // Anti-stuck firing mechanism if packets are delayed
                         if (renderTimestamp - snap.timestamp > 150) {
                             this.isShooting = false;
                         }
@@ -3610,12 +3721,11 @@
                     if (!this.isSpawned) {
                         this.mesh.visible = false;
                         this.engineSound.stop();
-                        return; // Keep them completely hidden and silent until ready
+                        return; 
                     } else {
                         this.mesh.visible = !this.isCrashed;
                     }
 
-                    // Locally generate fully immersive tracer physics + localized sound for networked enemy gunfire
                     if (this.isShooting && !this.isCrashed) {
                         const now = Date.now();
                         if (now - this.lastShot > 80) {
@@ -3623,13 +3733,14 @@
                             SoundGen.playShoot(this.mesh.position);
                             this.flashTimer = 0.1;
                             if (this.muzzleFlash) {
-                                this.muzzleFlash.visible = true;
+                                this.muzzleFlash.material.opacity = 0.8;
+                                this.muzzleFlashLight.intensity = 150;
                                 this.muzzleFlash.rotation.z = Math.random() * Math.PI;
                             }
                             _tempVec.set(0, 0, -4).applyMatrix4(this.mesh.matrixWorld);
-                            const p = projectilePool.find(proj => !proj.isActive);
+                            const p = getProjectile();
                             if (p) {
-                                p.activate(this.index, _tempVec, this.mesh.quaternion, this.speed);
+                                p.activate(this.index, _tempVec, this.mesh.quaternion, this.speed, false);
                             }
                         }
                     }
@@ -3639,9 +3750,13 @@
                     this.flashTimer -= (0.016 * timeScale);
                     if (this.flashTimer <= 0) {
                         this.flashTimer = 0;
-                        if (this.muzzleFlash) this.muzzleFlash.visible = false;
+                        if (this.muzzleFlash) {
+                            this.muzzleFlash.material.opacity = 0;
+                            this.muzzleFlashLight.intensity = 0;
+                        }
                     } else if (this.muzzleFlash) {
-                        this.muzzleFlash.visible = true;
+                        this.muzzleFlash.material.opacity = 0.8;
+                        this.muzzleFlashLight.intensity = 150;
                     }
                 }
 
@@ -3653,49 +3768,42 @@
                     this.engineSound.stop();
                 }
 
-                // --- PROGRESSIVE DAMAGE TRAILS ---
-if (!this.isCrashed && this.speed > 0.5) {
-    
-    // 1. Wing fuel vapor/smoke: Activates at 75% and stays active forever (no lower bound)
-    if (this.hp <= 75) {
-        if (Math.random() > 0.4) {
-            this.createTrail(0xcccccc, 0.4, 0.5, new THREE.Vector3(3.5, 0, 0.5));
-            this.createTrail(0xeeeeee, 0.3, 0.3, new THREE.Vector3(3.5, 0, 0.5));
-        }
-    } 
-    
-    // 2. Engine smoke: Activates independently once below 50%
-    if (this.hp <= 50 && this.hp > 25) {
-        if (Math.random() > 0.2) {
-            this.createTrail(0x444444, 0.8, 0.7, new THREE.Vector3(0, 0, 6.5));
-        }
-    } else if (this.hp <= 25) {
-        if (Math.random() > 0.1) {
-            this.createTrail(0x111111, 1.0, 0.9, new THREE.Vector3(0, 0, 6.5));
-        }
-        if (Math.random() > 0.6) {
-            this.createTrail(0xff6600, 0.5, 0.8, new THREE.Vector3(0, 0, 6.5), true);
-        }
-    }
-}
+                if (!this.isCrashed && this.speed > 0.5) {
+                    if (this.hp <= 75) {
+                        if (Math.random() > 0.4) {
+                            _tempVec.set(3.5, 0, 0.5);
+                            this.createTrail(0xcccccc, 0.4, 0.5, _tempVec);
+                            this.createTrail(0xeeeeee, 0.3, 0.3, _tempVec);
+                        }
+                    } 
+                    if (this.hp <= 50 && this.hp > 25) {
+                        if (Math.random() > 0.2) {
+                            _tempVec.set(0, 0, 6.5);
+                            this.createTrail(0x444444, 0.8, 0.7, _tempVec);
+                        }
+                    } else if (this.hp <= 25) {
+                        _tempVec.set(0, 0, 6.5);
+                        if (Math.random() > 0.1) {
+                            this.createTrail(0x111111, 1.0, 0.9, _tempVec);
+                        }
+                        if (Math.random() > 0.6) {
+                            this.createTrail(0xff6600, 0.5, 0.8, _tempVec, true);
+                        }
+                    }
+                }
 
-                // --- DYNAMIC WINGTIP CONTRAILS / VORTICES ---
                 if (!this.isCrashed && this.speed > 0.8) {
-                    // Calculate abstract 'G-Force' based on current control surface smoothing (aggressive maneuvers increase value)
                     const gIntensity = Math.abs(this.smoothedPitch) * 1.5 + Math.abs(this.smoothedRoll) * 1.0;
                     if (gIntensity > 0.6) {
-                        // Scale contrail opacity smoothly as G-forces increase beyond threshold
                         const vortexOpacity = Math.min(0.6, (gIntensity - 0.6) * 0.4);
                         this.createVortex(vortexOpacity);
                     }
                 }
 
-                // --- WATER SKIMMING / ROOSTER TAIL ---
                 if (!this.isCrashed && this.speed > 0.6) {
                     const heightOverWater = this.mesh.position.y - CONFIG.waterLevel;
                     if (heightOverWater < 12 && heightOverWater > -5) {
                         const tH = getVisualTerrainHeight(this.mesh.position.x, this.mesh.position.z);
-                        // Ensure we are over water (terrain is below water level)
                         if (tH <= CONFIG.waterLevel + 1) {
                             const intensity = Math.max(0, 1.0 - (heightOverWater / 12));
                             const particleCount = Math.floor(intensity * 3) + 1;
@@ -3709,26 +3817,26 @@ if (!this.isCrashed && this.speed > 0.5) {
                 for (let i = this.trailParticles.length - 1; i >= 0; i--) {
                     const p = this.trailParticles[i];
                     
-                    if (p.isFlame) {
-                        p.life -= 0.06 * timeScale;
-                        p.mesh.scale.multiplyScalar(1.0 - (0.05 * timeScale)); // shrink flame
+                    if (p.userData.isFlame) {
+                        p.userData.life -= 0.06 * timeScale;
+                        p.scale.multiplyScalar(1.0 - (0.05 * timeScale)); 
                     } else {
-                        p.life -= 0.02 * timeScale;
-                        if (p.isWater) {
-                            p.velocity.y -= 0.15 * timeScale; // Gravity for the water arc
-                            p.mesh.scale.multiplyScalar(1.0 + (0.015 * timeScale));
+                        p.userData.life -= 0.02 * timeScale;
+                        if (p.userData.isWater) {
+                            p.userData.velocity.y -= 0.15 * timeScale; 
+                            p.scale.multiplyScalar(1.0 + (0.015 * timeScale));
                         } else {
-                            p.mesh.scale.multiplyScalar(1.0 + (0.05 * timeScale));
+                            p.scale.multiplyScalar(1.0 + (0.05 * timeScale));
                         }
                     }
 
-                    p.mesh.position.addScaledVector(p.velocity, timeScale);
-                    p.mesh.material.opacity = p.life * (p.baseOpacity || 0.4);
-                    if (p.life <= 0) {
-                        scene.remove(p.mesh);
-                        p.mesh.geometry.dispose();
-                        p.mesh.material.dispose();
-                        this.trailParticles.splice(i, 1);
+                    p.position.addScaledVector(p.userData.velocity, timeScale);
+                    p.material.opacity = p.userData.life * p.userData.baseOpacity;
+                    
+                    if (p.userData.life <= 0) {
+                        sphereParticlePool.release(p);
+                        this.trailParticles[i] = this.trailParticles[this.trailParticles.length - 1];
+                        this.trailParticles.pop();
                     }
                 }
             }
@@ -3737,45 +3845,43 @@ if (!this.isCrashed && this.speed > 0.5) {
         function simulateAI(p, timeScale) {
             if (p.isCrashed) return;
             
-            // Find nearest non-crashed, active player
             let nearestTarget = null;
             let minDist = Infinity;
             
-            players.forEach(other => {
-                if (other.index === p.index) return;
-                if (other.isCrashed) return;
+            for (let i = 0; i < players.length; i++) {
+                let other = players[i];
+                if (other.index === p.index) continue;
+                if (other.isCrashed) continue;
                 
                 const isTargetSpawned = other.isLocal ? (typeof introCinematicActive !== 'undefined' ? !introCinematicActive : true) : other.isSpawned;
-                if (!isTargetSpawned) return;
-                if (other.disconnected) return;
+                if (!isTargetSpawned) continue;
+                if (other.disconnected) continue;
                 
                 const d = p.mesh.position.distanceTo(other.mesh.position);
                 if (d < minDist) {
                     minDist = d;
                     nearestTarget = other;
                 }
-            });
+            }
             
             let dist = Infinity;
             let localTarget = null;
 
             if (nearestTarget) {
-                // LEAD CALCULATION (Deflection Shooting)
                 const bulletSpeed = p.speed + 15.0; 
                 dist = p.mesh.position.distanceTo(nearestTarget.mesh.position);
-                
                 const timeToHit = dist / bulletSpeed; 
                 
-                // Predict target's future position
-                const targetForward = new THREE.Vector3(0, 0, -1).applyQuaternion(nearestTarget.mesh.quaternion);
-                const targetVelocity = targetForward.multiplyScalar(nearestTarget.speed);
-                const futurePos = nearestTarget.mesh.position.clone().addScaledVector(targetVelocity, timeToHit);
+                _aiTargetForward.set(0, 0, -1).applyQuaternion(nearestTarget.mesh.quaternion);
+                _aiTargetVelocity.copy(_aiTargetForward).multiplyScalar(nearestTarget.speed);
+                _aiFuturePos.copy(nearestTarget.mesh.position).addScaledVector(_aiTargetVelocity, timeToHit);
                 
-                const dir = _tempDiff.subVectors(futurePos, p.mesh.position);
-                const dirNorm = dir.clone().normalize();
-                localTarget = dirNorm.applyQuaternion(p.mesh.quaternion.clone().invert());
+                _tempDiff.subVectors(_aiFuturePos, p.mesh.position);
+                _aiDirNorm.copy(_tempDiff).normalize();
                 
-                // Steer towards predicted future position
+                _tempQuat.copy(p.mesh.quaternion).invert();
+                localTarget = _aiDirNorm.applyQuaternion(_tempQuat);
+                
                 let targetRoll = 0;
                 if (Math.abs(localTarget.x) > 0.01) {
                     targetRoll = -localTarget.x * 4.0; 
@@ -3791,7 +3897,6 @@ if (!this.isCrashed && this.speed > 0.5) {
                 }
                 p.inputs.pitch = Math.max(-1.0, Math.min(1.0, targetPitch));
                 
-                // Fire if aligned with FUTURE position
                 p.inputs.shoot = (localTarget.z < 0 && (localTarget.x * localTarget.x + localTarget.y * localTarget.y < 0.08) && dist < 1500);
             } else {
                 p.inputs.pitch = 0.0;
@@ -3799,22 +3904,22 @@ if (!this.isCrashed && this.speed > 0.5) {
                 p.inputs.shoot = false;
             }
             
-            // Ground avoidance override (highest priority)
             const forwardDist = 450; 
-            const forwardVec = new THREE.Vector3(0, 0, -1).applyQuaternion(p.mesh.quaternion);
-            const checkPos = p.mesh.position.clone().addScaledVector(forwardVec, forwardDist);
-            const terrainAhead = getTerrainHeight(checkPos.x, checkPos.z);
+            _aiForwardVec.set(0, 0, -1).applyQuaternion(p.mesh.quaternion);
+            _aiCheckPos.copy(p.mesh.position).addScaledVector(_aiForwardVec, forwardDist);
+            
+            const terrainAhead = getTerrainHeight(_aiCheckPos.x, _aiCheckPos.z);
             const currentTerrain = getTerrainHeight(p.mesh.position.x, p.mesh.position.z);
             const alertHeight = Math.max(terrainAhead, currentTerrain) + 150; 
             
             if (p.mesh.position.y < alertHeight) {
                 p.inputs.pitch = 1.0; 
-                const worldUpLocal = new THREE.Vector3(0, 1, 0).applyQuaternion(p.mesh.quaternion.clone().invert());
-                p.inputs.roll = -worldUpLocal.x * 4.0;
+                _tempQuat.copy(p.mesh.quaternion).invert();
+                _aiWorldUpLocal.set(0, 1, 0).applyQuaternion(_tempQuat);
+                p.inputs.roll = -_aiWorldUpLocal.x * 4.0;
                 p.inputs.throttle = 1.0; 
                 p.inputs.shoot = false; 
             } else {
-                // Smart throttle management
                 if (p.speed < stallSpeed + 0.4) {
                     p.inputs.throttle = 1.0;
                 } else if (p.speed > maxSpeed - 0.2) {
@@ -3831,9 +3936,10 @@ if (!this.isCrashed && this.speed > 0.5) {
             }
         }
 
-        // --- Core Scene Initialization ---
         async function initGameWorld(playerList, roomCode) {
             console.group("Initializing Game");
+            
+            cacheDOM();
             
             const bakeStatus = document.getElementById('bake-status-text');
 
@@ -3858,6 +3964,17 @@ if (!this.isCrashed && this.speed > 0.5) {
             scene = new THREE.Scene();
             scene.background = new THREE.Color(0xeaf4fc);
             scene.fog = new THREE.FogExp2(0xeaf4fc, CONFIG.fogDensity);
+            
+            boxParticlePool = new ParticlePool(sharedExplosionGeo, 1500);
+            sphereParticlePool = new ParticlePool(new THREE.IcosahedronGeometry(1, 0), 3000);
+            for (let i = 0; i < boxParticlePool.items.length; i++) scene.add(boxParticlePool.items[i].mesh);
+            for (let i = 0; i < sphereParticlePool.items.length; i++) scene.add(sphereParticlePool.items[i].mesh);
+            
+            for (let i = 0; i < MAX_PROJECTILES; i++) {
+                const proj = new Projectile();
+                scene.add(proj.mesh);
+                projectilePool.push(proj);
+            }
 
             const skyGeo = new THREE.SphereGeometry(25000, 32, 32);
             const skyMat = new THREE.ShaderMaterial({
@@ -3893,8 +4010,6 @@ if (!this.isCrashed && this.speed > 0.5) {
             const skyDome = new THREE.Mesh(skyGeo, skyMat);
             scene.add(skyDome);
 
-            for (let i = 0; i < MAX_PROJECTILES; i++) projectilePool.push(new Projectile());
-
             const sunDirToOrigin = new THREE.Vector3(-800, -500, 800).normalize();
             const sunGroup = new THREE.Group();
             const sunDist = 24000;
@@ -3926,7 +4041,10 @@ if (!this.isCrashed && this.speed > 0.5) {
                 if (isLocal) myPlayerIndex = p.index;
             });
 
-            const me = players.find(p => p.index === myPlayerIndex);
+            let me = null;
+            for (let i = 0; i < players.length; i++) {
+                if (players[i].index === myPlayerIndex) { me = players[i]; break; }
+            }
             if (me) document.getElementById('hud-name').innerText = me.name;
 
             csm = new CSM({
@@ -4254,7 +4372,6 @@ self.onmessage = function(e) {
                         geometry.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
                         geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
                         
-                        // Compile precision spatial grid mapping for identical visual collision checks
                         buildTerrainGrid(positions);
 
                         const terrainMaterial = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.9, metalness: 0.05, flatShading: true });
@@ -4279,18 +4396,13 @@ self.onmessage = function(e) {
                             wPosBase.setX(i, vx);
                             wPosBase.setY(i, vy);
                         }
-
                         const waterGeo = waterGeoBase.toNonIndexed();
                         const wPos = waterGeo.attributes.position;
                         const wCount = wPos.count;
-                        waterGeo.userData.originalX = new Float32Array(wCount);
-                        waterGeo.userData.originalY = new Float32Array(wCount);
 
                         const waterColors = new Float32Array(wCount * 3);
                         const colorDeep = new THREE.Color(0x2e8b9e);
                         for (let i = 0; i < wCount; i++) {
-                            waterGeo.userData.originalX[i] = wPos.getX(i);
-                            waterGeo.userData.originalY[i] = wPos.getY(i);
                             waterColors[i * 3] = colorDeep.r;
                             waterColors[i * 3 + 1] = colorDeep.g;
                             waterColors[i * 3 + 2] = colorDeep.b;
@@ -4301,6 +4413,23 @@ self.onmessage = function(e) {
                             color: 0xffffff, transparent: true, opacity: 0.82,
                             roughness: 0.2, metalness: 0.5, flatShading: true, vertexColors: true
                         });
+                        
+                        waterMat.onBeforeCompile = (shader) => {
+                            shader.uniforms.time = { value: 0 };
+                            waterMat.userData.shader = shader;
+                            shader.vertexShader = `
+                                uniform float time;
+                                ${shader.vertexShader}
+                            `.replace(
+                                `#include <begin_vertex>`,
+                                `
+                                #include <begin_vertex>
+                                float wave = (sin(position.x * 0.02 + time * 1.5) + cos(position.y * 0.02 + time * 1.5)) * 1.5;
+                                transformed.z += wave;
+                                `
+                            );
+                        };
+
                         const mainWater = new THREE.Mesh(waterGeo, waterMat);
                         mainWater.rotation.x = -Math.PI / 2;
                         mainWater.position.y = CONFIG.waterLevel;
@@ -4318,19 +4447,18 @@ self.onmessage = function(e) {
                         if (bakeStatus) bakeStatus.innerText = "PLANTING FORESTS...";
                         await yieldToBrowser();
 
-                        treeGrid.clear();
+                        treeGridDim = Math.ceil(CONFIG.width / TREE_GRID_SIZE);
+                        treeGridArr = new Array(treeGridDim * treeGridDim);
+                        for(let i=0; i<treeGridArr.length; i++) treeGridArr[i] = [];
+
                         const processTree = (data, count) => {
                             for(let i=0; i<count; i++) {
                                 const px = data[i*6], py = data[i*6+1], pz = data[i*6+2], pscale = data[i*6+3];
-                                const gx = Math.floor(px / TREE_GRID_SIZE);
-                                const gz = Math.floor(pz / TREE_GRID_SIZE);
-                                const key = gx + "," + gz;
-                                let cell = treeGrid.get(key);
-                                if (!cell) {
-                                    cell = [];
-                                    treeGrid.set(key, cell);
+                                const gx = Math.floor((px + CONFIG.width / 2) / TREE_GRID_SIZE);
+                                const gz = Math.floor((pz + CONFIG.width / 2) / TREE_GRID_SIZE);
+                                if (gx >= 0 && gx < treeGridDim && gz >= 0 && gz < treeGridDim) {
+                                    treeGridArr[gz * treeGridDim + gx].push({ x: px, y: py, z: pz, r: 3.5 * pscale, h: 32 * pscale, rSq: (3.5 * pscale + 4) ** 2 });
                                 }
-                                cell.push({ x: px, y: py, z: pz, r: 3.5 * pscale, h: 32 * pscale });
                             }
                         };
                         processTree(pineData, pineCount);
@@ -4419,40 +4547,54 @@ self.onmessage = function(e) {
             }
             scene.add(cloudInstancedMesh);
 
-            players.forEach(p => {
-                p.mesh.traverse(child => {
+            for (let i = 0; i < players.length; i++) {
+                players[i].mesh.traverse(child => {
                     child.frustumCulled = false;
                     if (child.isMesh && child.material) csm.setupMaterial(child.material);
                 });
-            });
+            }
 
-            // --- CINEMATIC TRANSITION SETUP ---
             const bakeOverlay = document.getElementById('bake-overlay');
             bakeOverlay.style.opacity = '0';
-            setTimeout(() => bakeOverlay.style.display = 'none', 500); // Quick fade out for the black screen
+            setTimeout(() => bakeOverlay.style.display = 'none', 500); 
 
-            uiActive = false; // Disable UI loop
+            uiActive = false; 
             const uiContainer = document.getElementById('ui-3d-container');
-            if(uiContainer) uiContainer.style.display = 'none'; // Instant hide the HTML Canvas for a seamless cut
+            if(uiContainer) uiContainer.style.display = 'none';
 
-            // Move the wireframe plane into the player's real world space
             introCinematicActive = true;
             introCinematicTime = 0;
             introWireframeMesh = uiPlane;
-            introWireframeMesh.scale.set(0.75, 0.75, 0.75); // Start at UI scale
+            introWireframeMesh.scale.set(0.75, 0.75, 0.75); 
             
-            // Capture its spinning rotation state to un-spin it smoothly
             initialWireframeQuat.copy(introWireframeMesh.quaternion);
             introWireframeMesh.position.set(0, 0, 0);
             
-            // Attach wireframe to player mesh BEFORE compiling shaders
             me.mesh.add(introWireframeMesh);
 
-            // PRECOMPILE 1: Compile the original opaque materials into the GPU cache now so we don't get a shader-hitch later
+            // Pre-render compilation phase to eliminate First-Shot Stutter
+            for (let i = 0; i < boxParticlePool.items.length; i++) boxParticlePool.items[i].mesh.visible = true;
+            for (let i = 0; i < sphereParticlePool.items.length; i++) sphereParticlePool.items[i].mesh.visible = true;
+            for (let i = 0; i < projectilePool.length; i++) projectilePool[i].mesh.visible = true;
+            for (let i = 0; i < players.length; i++) {
+                if (players[i].muzzleFlash) {
+                    players[i].muzzleFlash.material.opacity = 1;
+                    players[i].muzzleFlashLight.intensity = 150;
+                }
+            }
+
             renderer.compile(scene, me.camera);
 
-            // Hide the real plane's solid parts by making them transparent with 0 opacity
-            // Setting depthWrite = false prevents the invisible solid parts from occluding the wireframe
+            for (let i = 0; i < boxParticlePool.items.length; i++) boxParticlePool.items[i].mesh.visible = false;
+            for (let i = 0; i < sphereParticlePool.items.length; i++) sphereParticlePool.items[i].mesh.visible = false;
+            for (let i = 0; i < projectilePool.length; i++) projectilePool[i].mesh.visible = false;
+            for (let i = 0; i < players.length; i++) {
+                if (players[i].muzzleFlash) {
+                    players[i].muzzleFlash.material.opacity = 0;
+                    players[i].muzzleFlashLight.intensity = 0;
+                }
+            }
+
             me.mesh.children.forEach(c => {
                 if (c !== introWireframeMesh && c !== me.muzzleFlash) {
                     c.traverse(child => {
@@ -4465,10 +4607,8 @@ self.onmessage = function(e) {
                 }
             });
 
-            // Precompile the transparent materials into the GPU cache
             renderer.compile(scene, me.camera);
 
-            // Delayed UI fade in for standard HUD components
             const hud = document.getElementById('hud-main');
             hud.style.opacity = '0';
             hud.style.display = 'flex';
@@ -4484,7 +4624,6 @@ self.onmessage = function(e) {
             leaderboard.style.opacity = '0';
             leaderboard.style.transition = 'opacity 1.5s ease';
             
-            // Re-align audio controls when game fully starts
             document.getElementById('volume-control').classList.add('in-game');
 
             const quitBtn = document.getElementById('quit-btn');
@@ -4522,7 +4661,10 @@ self.onmessage = function(e) {
             if (code === 'KeyF' || code === 'Enter') inputState.shoot = state;
             if (code === 'KeyB') inputState.lookBack = state;
 
-            const me = players.find(p => p.index === myPlayerIndex);
+            let me = null;
+            for (let i = 0; i < players.length; i++) {
+                if (players[i].index === myPlayerIndex) { me = players[i]; break; }
+            }
             if (me) {
                 me.inputs = {
                     pitch: (inputState.pitchDown ? -1 : 0) + (inputState.pitchUp ? 1 : 0),
@@ -4537,16 +4679,18 @@ self.onmessage = function(e) {
         function handleGameState(packet) {
             lastGameStateTime = Date.now();
 
-            packet.players.forEach(pData => {
-                const p = players.find(pl => pl.index === pData.idx);
+            for (let i = 0; i < packet.players.length; i++) {
+                const pData = packet.players[i];
+                let p = null;
+                for (let j = 0; j < players.length; j++) {
+                    if (players[j].index === pData.idx) { p = players[j]; break; }
+                }
                 if (p) p.syncData(pData);
-            });
+            }
 
-            // Player disposal is now handled robustly by LOBBY_UPDATE events instead of 
-            // transient GAME_STATE packet inclusion to prevent late-joiner race conditions.
-            
-            // Actively purge disconnected players from array to prevent memory leaks over time
-            players = players.filter(p => !p.disconnected);
+            for (let i = players.length - 1; i >= 0; i--) {
+                if (players[i].disconnected) players.splice(i, 1);
+            }
 
             const now = Date.now();
             if (!window.lastLeaderboardUpdate || now - window.lastLeaderboardUpdate > 1000) {
@@ -4556,14 +4700,21 @@ self.onmessage = function(e) {
         }
 
         function updateLeaderboard() {
-            const sortedPlayers = [...players].filter(p => !p.disconnected).sort((a, b) => {
+            const sortedPlayers = [];
+            for (let i = 0; i < players.length; i++) {
+                if (!players[i].disconnected) sortedPlayers.push(players[i]);
+            }
+            
+            sortedPlayers.sort((a, b) => {
                 if (b.kills !== a.kills) return b.kills - a.kills;
                 return a.deaths - b.deaths;
             });
+            
             const tbody = document.getElementById('leaderboard-body');
             tbody.innerHTML = '';
 
-            sortedPlayers.forEach(p => {
+            for (let i = 0; i < sortedPlayers.length; i++) {
+                const p = sortedPlayers[i];
                 const tr = document.createElement('tr');
                 if (p.index === myPlayerIndex) tr.classList.add('current-player-row');
 
@@ -4586,30 +4737,28 @@ self.onmessage = function(e) {
                 tr.appendChild(kTd);
                 tr.appendChild(dTd);
                 tbody.appendChild(tr);
-            });
+            }
         }
 
         function updateHUD(me) {
             const speed = Math.round(me.speed * 160);
             if (speed !== _hudCache.speed) {
-                document.getElementById('speedVal').innerText = speed;
+                _DOM.speedVal.innerText = speed;
                 _hudCache.speed = speed;
             }
             const throt = Math.round(me.throttle * 100);
             if (throt !== _hudCache.throt) {
-                document.getElementById('throtVal').innerText = throt;
+                _DOM.throtVal.innerText = throt;
                 _hudCache.throt = throt;
             }
             if (me.hp !== _hudCache.hp) {
-                document.getElementById('hpVal').innerText = me.hp;
+                _DOM.hpVal.innerText = me.hp;
                 _hudCache.hp = me.hp;
             }
             const alt = Math.round(me.mesh.position.y - CONFIG.waterLevel);
             if (alt !== _hudCache.alt) {
-                const altEl = document.getElementById('altVal');
-                altEl.innerText = alt;
-                const altContainer = document.getElementById('altValContainer');
-                altContainer.style.color = alt < 20 ? '#ff4444' : '#ffffff';
+                _DOM.altVal.innerText = alt;
+                _DOM.altValContainerStyle.color = alt < 20 ? '#ff4444' : '#ffffff';
                 _hudCache.alt = alt;
             }
 
@@ -4619,49 +4768,47 @@ self.onmessage = function(e) {
             if (degrees < 0) degrees += 360;
 
             if (degrees !== _hudCache.hdg) {
-                document.getElementById('headingVal').innerText = degrees;
+                _DOM.headingVal.innerText = degrees;
                 _hudCache.hdg = degrees;
             }
 
-            // HUD Logic for Reloading Mechanics
             if (me.isReloading) {
                 const now = Date.now();
                 let progress = (now - me.reloadTimerStart) / me.reloadTime;
                 if (progress > 1) progress = 1;
-                document.getElementById('ammoBar').style.width = (progress * 100) + "%";
+                _DOM.ammoBarStyle.width = (progress * 100) + "%";
                 
                 if (_hudCache.reloading !== true) {
-                    document.getElementById('ammoText').innerText = "0";
-                    document.getElementById('ammoText').style.color = '#ffaa00';
-                    document.getElementById('ammoBar').style.background = '#ffaa00';
-                    document.getElementById('reloadWarn').style.display = 'block';
+                    _DOM.ammoText.innerText = "0";
+                    _DOM.ammoTextStyle.color = '#ffaa00';
+                    _DOM.ammoBarStyle.background = '#ffaa00';
+                    _DOM.reloadWarnStyle.display = 'block';
                     _hudCache.reloading = true;
                 }
             } else {
                 if (_hudCache.ammo !== me.currentAmmo || _hudCache.reloading === true) {
-                    document.getElementById('ammoText').innerText = me.currentAmmo;
-                    document.getElementById('ammoText').style.color = '#ffffff';
-                    document.getElementById('ammoBar').style.width = ((me.currentAmmo / me.maxAmmo) * 100) + "%";
-                    document.getElementById('ammoBar').style.background = '#ffffff';
-                    document.getElementById('reloadWarn').style.display = 'none';
+                    _DOM.ammoText.innerText = me.currentAmmo;
+                    _DOM.ammoTextStyle.color = '#ffffff';
+                    _DOM.ammoBarStyle.width = ((me.currentAmmo / me.maxAmmo) * 100) + "%";
+                    _DOM.ammoBarStyle.background = '#ffffff';
+                    _DOM.reloadWarnStyle.display = 'none';
                     _hudCache.ammo = me.currentAmmo;
                     _hudCache.reloading = false;
                 }
             }
 
-            // Only show stall warning if we are actually alive and stalled
             const showStall = me.isStalled && !me.isCrashed;
             if (showStall !== _hudCache.stall) {
-                document.getElementById('stallWarn').style.display = showStall ? 'block' : 'none';
+                _DOM.stallWarnStyle.display = showStall ? 'block' : 'none';
                 _hudCache.stall = showStall;
             }
 
-            players.forEach(p => {
-                if (p.index === myPlayerIndex || p.disconnected) return; // ignore dropped players
+            for (let i = 0; i < players.length; i++) {
+                const p = players[i];
+                if (p.index === myPlayerIndex || p.disconnected) continue; 
 
-                const blip = p.radarBlip;
-                // Only show radar blips for planes that are actively spawned in and alive
-                if (!p.isCrashed && p.mesh.visible && p.isSpawned && blip) {
+                const blipStyle = p.radarBlipStyle;
+                if (!p.isCrashed && p.mesh.visible && p.isSpawned && blipStyle) {
                     _tempDiff.subVectors(p.mesh.position, me.mesh.position);
                     const enemyAngle = Math.atan2(_tempDiff.x, _tempDiff.z);
                     const delta = headingAngle - enemyAngle;
@@ -4675,12 +4822,12 @@ self.onmessage = function(e) {
                         const ratio = 65 / dist;
                         rX *= ratio; rY *= ratio;
                     }
-                    blip.style.transform = `translate(-50%, -50%) translate(${70 + rX}px, ${70 + rY}px)`;
-                    blip.style.display = 'block';
-                } else if (blip) {
-                    blip.style.display = 'none';
+                    blipStyle.transform = `translate(-50%, -50%) translate(${70 + rX}px, ${70 + rY}px)`;
+                    blipStyle.display = 'block';
+                } else if (blipStyle) {
+                    blipStyle.display = 'none';
                 }
-            });
+            }
         }
 
         function animate() {
@@ -4691,36 +4838,32 @@ self.onmessage = function(e) {
             const timeScale = Math.min(delta, 0.1) * 60;
             const elapTime = clock.getElapsedTime();
 
-            waterMeshes.forEach(w => {
-                const pos = w.geometry.attributes.position;
-                const origX = w.geometry.userData.originalX;
-                const origY = w.geometry.userData.originalY;
-                for (let i = 0; i < pos.count; i++) {
-                    const wave = (Math.sin(origX[i] * 0.02 + elapTime * 1.5) + Math.cos(origY[i] * 0.02 + elapTime * 1.5)) * 1.5;
-                    pos.setZ(i, wave);
-                }
-                pos.needsUpdate = true;
-            });
+            if (waterMeshes.length > 0 && waterMeshes[0].material.userData.shader) {
+                waterMeshes[0].material.userData.shader.uniforms.time.value = elapTime;
+            }
 
             if (cloudInstancedMesh) {
-                const dummy = new THREE.Object3D();
                 for (let i = 0; i < cloudsData.length; i++) {
                     const c = cloudsData[i];
                     c.x -= c.speed * delta;
                     if (c.x < -CONFIG.width / 2) c.x = CONFIG.width / 2;
-                    dummy.position.set(c.x, c.y, c.z);
-                    dummy.scale.setScalar(c.scale);
-                    dummy.rotation.set(0, 0, 0);
-                    dummy.updateMatrix();
-                    cloudInstancedMesh.setMatrixAt(i, dummy.matrix);
+                    _cloudDummy.position.set(c.x, c.y, c.z);
+                    _cloudDummy.scale.setScalar(c.scale);
+                    _cloudDummy.rotation.set(0, 0, 0);
+                    _cloudDummy.updateMatrix();
+                    cloudInstancedMesh.setMatrixAt(i, _cloudDummy.matrix);
                 }
                 cloudInstancedMesh.instanceMatrix.needsUpdate = true;
             }
 
-            const me = players.find(p => p.index === myPlayerIndex);
+            let me = null;
+            for (let i = 0; i < players.length; i++) {
+                if (players[i].index === myPlayerIndex) { me = players[i]; break; }
+            }
 
-            players.forEach(p => {
-                if (p.disconnected) return; // Skip updating disconnected players
+            for (let i = 0; i < players.length; i++) {
+                let p = players[i];
+                if (p.disconnected) continue; 
 
                 if (p.index === myPlayerIndex) {
                     p.updatePhysics(timeScale);
@@ -4732,9 +4875,10 @@ self.onmessage = function(e) {
                 }
                 
                 p.updateVisuals(timeScale);
-            });
+            }
 
-            for (const proj of projectilePool) {
+            for (let i = 0; i < projectilePool.length; i++) {
+                const proj = projectilePool[i];
                 if (!proj.isActive) continue;
                 if (!proj.update(timeScale)) {
                     if (proj.hitType === 'water') {
@@ -4750,8 +4894,9 @@ self.onmessage = function(e) {
                     proj.isActive = false; proj.mesh.visible = false;
                     continue;
                 }
-                if (proj.ownerIdx === myPlayerIndex || (isHost && players.find(pl => pl.index === proj.ownerIdx && pl.isAI))) {
-                    for (let p of players) {
+                if (proj.ownerIdx === myPlayerIndex || proj.isLocalOrHostAI) {
+                    for (let j = 0; j < players.length; j++) {
+                        let p = players[j];
                         const isTargetSpawned = p.isLocal ? (typeof introCinematicActive !== 'undefined' ? !introCinematicActive : true) : p.isSpawned;
                         if (p.index !== proj.ownerIdx && !p.isCrashed && isTargetSpawned && !p.disconnected) {
                             if (proj.mesh.position.distanceTo(p.mesh.position) < 12) {
@@ -4761,7 +4906,10 @@ self.onmessage = function(e) {
                                 const hitData = { type: 'HIT_EVENT', targetIdx: p.index, attackerIdx: proj.ownerIdx, dmg: 15 };
                                 if (isHost) {
                                     socket.emit('host_broadcast', { roomCode: myRoomCode, data: hitData });
-                                    const target = players.find(pl => pl.index === p.index);
+                                    let target = null;
+                                    for (let k = 0; k < players.length; k++) {
+                                        if (players[k].index === p.index) { target = players[k]; break; }
+                                    }
                                     if (target && (target.index === myPlayerIndex || target.isAI)) {
                                         target.takeDamage(20, proj.ownerIdx);
                                     }
@@ -4775,18 +4923,18 @@ self.onmessage = function(e) {
                 }
             }
 
+            // O(1) Array Swap & Pop to eliminate array shift re-allocations
             for (let i = explosions.length - 1; i >= 0; i--) {
                 if (!explosions[i].update(timeScale)) {
                     explosions[i].dispose();
-                    explosions.splice(i, 1);
+                    explosions[i] = explosions[explosions.length - 1]; 
+                    explosions.pop();
                 }
             }
 
             if (me && me.mesh) {
                 me.mesh.updateMatrixWorld();
 
-                // --- CAMERA HANDLING ---
-                // Calculate ideal loose chase cam position continuously
                 if (inputState.lookBack) {
                     _tempVec.set(0, 6, -25).applyMatrix4(me.mesh.matrixWorld);
                 } else {
@@ -4794,7 +4942,6 @@ self.onmessage = function(e) {
                 }
                 const lerpFactor = 1.0 - Math.pow(0.8, timeScale);
 
-                // We track a virtual 'chasePos' that runs all the time so it inherits the natural camera lag
                 if (!me.virtualChasePos) {
                     me.virtualChasePos = _tempVec.clone();
                 } else {
@@ -4808,76 +4955,64 @@ self.onmessage = function(e) {
                     if (progress >= 1.0) {
                         progress = 1.0;
                         introCinematicActive = false;
-                        introWireframeMesh.visible = false; // Hide instead of remove to protect scene graph
+                        introWireframeMesh.visible = false; 
                         me.camera.clearViewOffset();
                         me.camera.fov = 60;
                         me.camera.updateProjectionMatrix();
                         
-                        // Restore properties on the original materials instantly without stutters
-                        me.mesh.traverse(child => {
-                            if (child.isMesh && child !== introWireframeMesh) {
-                                child.material.opacity = 1.0;
-                                child.material.depthWrite = true;
-                            }
-                        });
+                        me.mesh.children.forEach(c => {
+    // Prevent the muzzle flash from being forced to 1.0 opacity
+    if (c !== introWireframeMesh && c !== me.muzzleFlash) {
+        c.traverse(child => {
+            if (child.isMesh && child.material) {
+                child.material.opacity = 1.0;
+                child.material.depthWrite = true;
+            }
+        });
+    }
+});
                     }
                     
-                    // Split the transition into 3 strictly sequenced phases
-                    // 0.0 to 0.6: Camera/Wireframe physically move and align into final position
-                    // 0.6 to 0.8: Solid plane fades in completely while everything else holds still
-                    // 0.8 to 1.0: Wireframe lines shrink completely and vanish
                     const moveProgress = Math.min(Math.max(progress / 0.6, 0.0), 1.0);
                     const fadeProgress = Math.min(Math.max((progress - 0.6) / 0.2, 0.0), 1.0);
                     const shrinkProgress = Math.min(Math.max((progress - 0.8) / 0.2, 0.0), 1.0);
 
-                    // Smoother Cubic Ease-In-Out transition for the movement
                     const easeCubicInOut = moveProgress < 0.5 ? 4 * moveProgress * moveProgress * moveProgress : 1 - Math.pow(-2 * moveProgress + 2, 3) / 2;
-                    
-                    // Wireframe logic (align rotation smoothly, spin propeller)
                     introWireframeMesh.quaternion.slerpQuaternions(initialWireframeQuat, targetWireframeQuat, easeCubicInOut);
                     if (introWireframeMesh.propeller) {
                         introWireframeMesh.propeller.rotation.z += (0.3 + (me.speed * 0.5)) * timeScale;
                     }
 
-                    // Send shrink command to our custom shader (from 0.0 to 1.0)
                     wireMat.uniforms.shrinkFactor.value = shrinkProgress;
-                    wireMat.uniforms.opacity.value = 0.35; // Ensure wireframe keeps its opacity natively
+                    wireMat.uniforms.opacity.value = 0.35; 
                     
-                    // Apply solid plane fade in logic based exclusively on the fadeProgress timeline phase
                     me.mesh.children.forEach(c => {
                         if (c !== introWireframeMesh && c !== me.muzzleFlash) {
                             c.traverse(child => {
-                                if (child.isMesh) {
+                                if (child.isMesh && child.material) {
                                     child.material.opacity = fadeProgress;
                                 }
                             });
                         }
                     });
                     
-                    // Cinematic Camera Sweep Calculation
-                    // 1. Replicate exact UI dummy camera
-                    const _dummyCam = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
-                    _dummyCam.position.set(-10, 7, -8);
-                    _dummyCam.lookAt(0, 0, 0);
-                    _dummyCam.translateX(-2.4);
+                    _cineDummyCam.position.set(-10, 7, -8);
+                    _cineDummyCam.lookAt(0, 0, 0);
+                    _cineDummyCam.translateX(-2.4);
                     
-                    const startOffset = _dummyCam.position.clone().applyMatrix4(me.mesh.matrixWorld); 
-                    
-                    // By lerping towards the virtualChasePos instead of a fixed offset, 
-                    // the camera perfectly inherits the chase-cam's springy physics on the final frame!
-                    const currentPos = startOffset.clone().lerp(me.virtualChasePos, easeCubicInOut);
+                    _cineStartOffset.copy(_cineDummyCam.position).applyMatrix4(me.mesh.matrixWorld); 
+                    const currentPos = _cineStartOffset.lerp(me.virtualChasePos, easeCubicInOut);
                     me.camera.position.copy(currentPos);
                     
-                    const forward = new THREE.Vector3(0, 0, -10).applyQuaternion(_dummyCam.quaternion);
-                    const localLookAtTarget = _dummyCam.position.clone().add(forward);
-                    const adjustedStartLookAt = localLookAtTarget.applyMatrix4(me.mesh.matrixWorld); 
+                    _tempVec.set(0, 0, -10).applyQuaternion(_cineDummyCam.quaternion);
+                    _cineLocalLookAt.copy(_cineDummyCam.position).add(_tempVec);
+                    _cineLocalLookAt.applyMatrix4(me.mesh.matrixWorld); 
                     
-                    const endLookAt = new THREE.Vector3(0, 0, -30).applyMatrix4(me.mesh.matrixWorld);
-                    const currentLookAt = adjustedStartLookAt.clone().lerp(endLookAt, easeCubicInOut);
+                    _cineEndLookAt.set(0, 0, -30).applyMatrix4(me.mesh.matrixWorld);
+                    _cineLocalLookAt.lerp(_cineEndLookAt, easeCubicInOut);
                     
-                    me.camera.lookAt(currentLookAt);
+                    me.camera.lookAt(_cineLocalLookAt);
                     
-                    // 2. Adjust for aspect ratio horizontal shift and scale mapping constraints
                     const baseScale = 0.75 + (0.25 * easeCubicInOut);
                     introWireframeMesh.scale.set(baseScale, baseScale, baseScale);
 
@@ -4896,8 +5031,6 @@ self.onmessage = function(e) {
                     }
                     
                 } else {
-                    // Standard Chase Cam
-                    // Since virtualChasePos is already handling the smooth follow logic, we just copy it directly
                     me.camera.position.copy(me.virtualChasePos);
                     if (inputState.lookBack) {
                         _tempDiff.set(0, 0, 30).applyMatrix4(me.mesh.matrixWorld);
@@ -4924,16 +5057,13 @@ self.onmessage = function(e) {
                     audioCtx.listener.upZ.setTargetAtTime(_audioUp.z, t, 0.1);
                 }
 
-                // EXACT Polygon Cloud Whiteout Effect Check using the Winding Number (Parity) Raycast algorithm
                 let insideCloud = false;
                 const camPos = me.camera.position;
                 let nearCloud = false;
                 
-                // Broad-phase: check if the camera is near ANY cloud instance
                 for (let i = 0; i < cloudsData.length; i++) {
                     const c = cloudsData[i];
-                    const distSq =(camPos.x - c.x) ** 2 + (camPos.y - c.y) ** 2 + (camPos.z - c.z) ** 2;
-                    // Use a slightly larger broad-phase margin (x1.5) to ensure we check edge overlaps
+                    const distSq = (camPos.x - c.x) ** 2 + (camPos.y - c.y) ** 2 + (camPos.z - c.z) ** 2;
                     if (distSq < cloudBaseRadiusSq * (c.scale * c.scale) * 1.5) {
                         nearCloud = true;
                         break;
@@ -4941,30 +5071,23 @@ self.onmessage = function(e) {
                 }
 
                 if (nearCloud) {
-                    const raycaster = new THREE.Raycaster();
-                    // Shoot a math ray strictly upwards from the camera
-                    raycaster.set(camPos, new THREE.Vector3(0, 1, 0));
+                    _raycaster.set(camPos, _rayDirUp);
                     
-                    // Get ALL faces intersected on the cloud mesh to guarantee self-intersecting mesh logic is caught
-                    const intersects = raycaster.intersectObject(cloudInstancedMesh, false);
+                    const intersects = _raycaster.intersectObject(cloudInstancedMesh, false);
                     
                     let windingNumber = 0;
-                    const rayDir = raycaster.ray.direction;
-                    const instanceMatrix = new THREE.Matrix4();
-                    const normalMatrix = new THREE.Matrix3();
+                    const rayDir = _raycaster.ray.direction;
                     
                     for (let i = 0; i < intersects.length; i++) {
                         const hit = intersects[i];
                         if (!hit.face) continue;
 
-                        cloudInstancedMesh.getMatrixAt(hit.instanceId, instanceMatrix);
-                        normalMatrix.getNormalMatrix(instanceMatrix);
+                        cloudInstancedMesh.getMatrixAt(hit.instanceId, _instanceMatrix);
+                        _normalMatrix.getNormalMatrix(_instanceMatrix);
                         
-                        // Apply the instance's rotation/scale matrix to find out which way the face is pointing in world space
-                        const worldNormal = hit.face.normal.clone().applyMatrix3(normalMatrix).normalize();
-                        const dot = rayDir.dot(worldNormal);
+                        _tempVec.copy(hit.face.normal).applyMatrix3(_normalMatrix).normalize();
+                        const dot = rayDir.dot(_tempVec);
                         
-                        // Exiting a polygon adds to the winding count, Entering subtracts.
                         if (dot > 0.0001) {
                             windingNumber -= 1; 
                         } else if (dot < -0.0001) {
@@ -4972,13 +5095,15 @@ self.onmessage = function(e) {
                         }
                     }
                     
-                    // A non-zero winding number guarantees the exact camera origin sits mathematically inside the polygon volume
                     if (windingNumber !== 0) {
                         insideCloud = true;
                     }
                 }
                 
-                document.getElementById('cloud-whiteout').style.display = insideCloud ? 'block' : 'none';
+                if (insideCloud !== _hudCache.cloudWhiteout) {
+                    _DOM.cloudWhiteoutStyle.display = insideCloud ? 'block' : 'none';
+                    _hudCache.cloudWhiteout = insideCloud;
+                }
 
                 updateHUD(me);
                 me.camera.updateMatrixWorld();
@@ -5000,7 +5125,11 @@ self.onmessage = function(e) {
                 uiRenderer.setSize(width * 0.7, height);
             }
 
-            const me = players.find(p => p.index === myPlayerIndex);
+            let me = null;
+            for (let i = 0; i < players.length; i++) {
+                if (players[i].index === myPlayerIndex) { me = players[i]; break; }
+            }
+            
             if (me) {
                 me.camera.aspect = width / height;
                 me.camera.updateProjectionMatrix();
