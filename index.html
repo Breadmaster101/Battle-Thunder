@@ -3043,6 +3043,35 @@
                 });
             }
 
+            createWaterSpray(opacity = 0.5) {
+                const size = 0.8 + Math.random() * 1.2;
+                const geo = new THREE.IcosahedronGeometry(size, 0);
+                const mat = new THREE.MeshBasicMaterial({ color: 0xddffff, transparent: true, opacity: opacity });
+                const mesh = new THREE.Mesh(geo, mat);
+                
+                // Spawn position: horizontally behind the plane, vertically locked exactly at the water level
+                const backVec = new THREE.Vector3(0, 0, 4).applyQuaternion(this.mesh.quaternion);
+                const pos = this.mesh.position.clone().add(backVec);
+                pos.y = CONFIG.waterLevel;
+                mesh.position.copy(pos);
+                scene.add(mesh);
+                
+                // Velocity: mostly upwards, slight random spread, inherited forward momentum
+                const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(this.mesh.quaternion);
+                const vel = new THREE.Vector3(
+                    (Math.random() - 0.5) * 1.5,
+                    1.5 + Math.random() * 2.5, 
+                    (Math.random() - 0.5) * 1.5
+                );
+                vel.addScaledVector(forward, this.speed * 0.2);
+
+                this.trailParticles.push({
+                    mesh: mesh, life: 1.0, baseOpacity: opacity,
+                    velocity: vel,
+                    isWater: true
+                });
+            }
+
             explode() {
                 if (this.isCrashed) return;
                 this.isCrashed = true;
@@ -3442,11 +3471,34 @@
                     }
                 }
 
+                // --- WATER SKIMMING / ROOSTER TAIL ---
+                if (!this.isCrashed && this.speed > 0.6) {
+                    const heightOverWater = this.mesh.position.y - CONFIG.waterLevel;
+                    if (heightOverWater < 12 && heightOverWater > -5) {
+                        const tH = getVisualTerrainHeight(this.mesh.position.x, this.mesh.position.z);
+                        // Ensure we are over water (terrain is below water level)
+                        if (tH <= CONFIG.waterLevel + 1) {
+                            const intensity = Math.max(0, 1.0 - (heightOverWater / 12));
+                            const particleCount = Math.floor(intensity * 3) + 1;
+                            for (let k = 0; k < particleCount; k++) {
+                                this.createWaterSpray(intensity * 0.6);
+                            }
+                        }
+                    }
+                }
+
                 for (let i = this.trailParticles.length - 1; i >= 0; i--) {
                     const p = this.trailParticles[i];
                     p.life -= 0.02 * timeScale;
+                    
+                    if (p.isWater) {
+                        p.velocity.y -= 0.15 * timeScale; // Gravity for the water arc
+                        p.mesh.scale.multiplyScalar(1.0 + (0.015 * timeScale));
+                    } else {
+                        p.mesh.scale.multiplyScalar(1.0 + (0.05 * timeScale));
+                    }
+
                     p.mesh.position.addScaledVector(p.velocity, timeScale);
-                    p.mesh.scale.multiplyScalar(1.0 + (0.05 * timeScale));
                     p.mesh.material.opacity = p.life * (p.baseOpacity || 0.4);
                     if (p.life <= 0) {
                         scene.remove(p.mesh);
