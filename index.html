@@ -4758,7 +4758,7 @@ self.onmessage = function(e) {
                                 explosions.push(new Explosion(proj.mesh.position, 0xffaa00));
                                 SoundGen.playExplosion(proj.mesh.position);
                                 proj.isActive = false; proj.mesh.visible = false;
-                                const hitData = { type: 'HIT_EVENT', targetIdx: p.index, attackerIdx: proj.ownerIdx, dmg: 20 };
+                                const hitData = { type: 'HIT_EVENT', targetIdx: p.index, attackerIdx: proj.ownerIdx, dmg: 15 };
                                 if (isHost) {
                                     socket.emit('host_broadcast', { roomCode: myRoomCode, data: hitData });
                                     const target = players.find(pl => pl.index === p.index);
