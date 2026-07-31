@@ -1027,6 +1027,7 @@
         const _instanceMatrix = new THREE.Matrix4();
         const _normalMatrix = new THREE.Matrix3();
         const _rayDirUp = new THREE.Vector3(0, 1, 0);
+        const _cloudIntersections = [];
 
         // Variables for AI simulation (reused to avoid allocation GC spikes)
         const _aiTargetForward = new THREE.Vector3();
@@ -1333,11 +1334,12 @@
             uiCurrentLookAt.lerp(uiTargetLookAt, 0.05);
             uiCamera.lookAt(uiCurrentLookAt);
 
-            const origPos = uiCamera.position.clone();
             uiCamera.translateX(-2.4);
 
             uiRenderer.render(uiScene, uiCamera);
-            uiCamera.position.copy(origPos);
+            // Undo the local-space camera offset directly. This avoids allocating a
+            // Vector3 on every lobby frame while leaving the camera pose unchanged.
+            uiCamera.translateX(2.4);
         }
 
         initUI3D();
@@ -1400,7 +1402,9 @@
         let waterMeshes = [];
         let cloudsData = [];
         let cloudInstancedMesh;
+        let cloudRaycastMesh;
         let cloudBaseRadiusSq = 0;
+        let cloudMaxOriginRadiusSq = 0;
         const AI_CLOUD_AIM_CONFIDENCE = 0.35;
         const clock = new THREE.Clock();
 
@@ -1422,19 +1426,14 @@
         const MAX_PLANE_AMMO = 67;
 
         let players = [];
+        let localPlayer = null;
 
         // --- MULTIPLAYER NETWORK LOOP ---
         setInterval(() => {
             if (!gameActive) return;
             const now = Date.now();
             
-            let me = null;
-            for (let i = 0; i < players.length; i++) {
-                if (players[i].index === myPlayerIndex) {
-                    me = players[i];
-                    break;
-                }
-            }
+            const me = localPlayer;
 
             if (!isHost && gameActive) {
                 if (lastGameStateTime > 0 && now - lastGameStateTime > 15000) {
@@ -1516,13 +1515,7 @@
             inputState.shoot = false;
             inputState.lookBack = false;
             
-            let me = null;
-            for (let i = 0; i < players.length; i++) {
-                if (players[i].index === myPlayerIndex) {
-                    me = players[i];
-                    break;
-                }
-            }
+            const me = localPlayer;
             if (me) {
                 me.inputs.pitch = 0;
                 me.inputs.roll = 0;
@@ -2271,9 +2264,13 @@
                 this.propGain.gain.value = 0;
                 this.whineGain.gain.value = 0;
                 this.windGain.gain.value = 0;
+                this.isStopped = false;
             }
 
             update(speed, throttle, pos) {
+                // A remote player can become spawned without a reset event. Restore
+                // its engine once here, rather than queuing repeated stop events.
+                if (this.isStopped) this.restart();
                 const t = audioCtx.currentTime;
                 const dt = 0.1;
 
@@ -2308,10 +2305,16 @@
             }
 
             stop() {
+                // Calling AudioParam automation every render frame accumulates a
+                // large event queue for crashed/unspawned players. One fade reaches
+                // the identical silent state.
+                if (this.isStopped) return;
+                this.isStopped = true;
                 this.gain.gain.setTargetAtTime(0, audioCtx.currentTime, 0.3);
             }
 
             restart() {
+                this.isStopped = false;
                 this.gain.gain.setTargetAtTime(1.0, audioCtx.currentTime, 0.1);
             }
         }
@@ -2468,6 +2471,7 @@
                             myRoomCode = "";
                             netPlayers = [];
                             players = [];
+                            localPlayer = null;
                             socket.connect();
                         }
                         return;
@@ -2669,6 +2673,7 @@
             myRoomCode = "";
             netPlayers = [];
             players = [];
+            localPlayer = null;
             if (socket) socket.connect();
         }
 
@@ -4216,16 +4221,18 @@
             scene.add(new THREE.HemisphereLight(0xfff8f0, 0x88bbdd, 1.0));
 
             players = [];
+            localPlayer = null;
             playerList.forEach(p => {
                 const isLocal = (p.id === socket.id);
-                players.push(new Player(p, isLocal));
-                if (isLocal) myPlayerIndex = p.index;
+                const player = new Player(p, isLocal);
+                players.push(player);
+                if (isLocal) {
+                    myPlayerIndex = p.index;
+                    localPlayer = player;
+                }
             });
 
-            let me = null;
-            for (let i = 0; i < players.length; i++) {
-                if (players[i].index === myPlayerIndex) { me = players[i]; break; }
-            }
+            const me = localPlayer;
             if (me) document.getElementById('hud-name').innerText = me.name;
 
             csm = new CSM({
@@ -4705,11 +4712,19 @@ self.onmessage = function(e) {
             const baseCloudGeo = createCloudMesh();
             baseCloudGeo.computeBoundingSphere();
             cloudBaseRadiusSq = Math.pow(baseCloudGeo.boundingSphere.radius, 2);
+            const maxOriginRadius = baseCloudGeo.boundingSphere.center.length() + baseCloudGeo.boundingSphere.radius;
+            cloudMaxOriginRadiusSq = maxOriginRadius * maxOriginRadius;
 
             const cloudMat = new THREE.MeshStandardMaterial({ color: 0xffffff, flatShading: true, roughness: 0.85, metalness: 0.0, side: THREE.DoubleSide });
             cloudInstancedMesh = new THREE.InstancedMesh(baseCloudGeo, cloudMat, CLOUD_COUNT);
             cloudInstancedMesh.castShadow = true;
             cloudInstancedMesh.receiveShadow = true;
+
+            // This non-rendered mesh is used only for exact cloud containment
+            // raycasts. It shares the instance geometry and material, but lets us
+            // test only nearby instances instead of raycasting every cloud.
+            cloudRaycastMesh = new THREE.Mesh(baseCloudGeo, cloudMat);
+            cloudRaycastMesh.matrixAutoUpdate = false;
 
             const dummy = new THREE.Object3D();
             for (let i = 0; i < CLOUD_COUNT; i++) {
@@ -4844,10 +4859,7 @@ self.onmessage = function(e) {
             if (code === 'KeyF' || code === 'Enter') inputState.shoot = state;
             if (code === 'KeyB') inputState.lookBack = state;
 
-            let me = null;
-            for (let i = 0; i < players.length; i++) {
-                if (players[i].index === myPlayerIndex) { me = players[i]; break; }
-            }
+            const me = localPlayer;
             if (me) {
                 me.inputs = {
                     pitch: (inputState.pitchDown ? -1 : 0) + (inputState.pitchUp ? 1 : 0),
@@ -5039,10 +5051,7 @@ self.onmessage = function(e) {
                 cloudInstancedMesh.instanceMatrix.needsUpdate = true;
             }
 
-            let me = null;
-            for (let i = 0; i < players.length; i++) {
-                if (players[i].index === myPlayerIndex) { me = players[i]; break; }
-            }
+            const me = localPlayer;
 
             for (let i = 0; i < players.length; i++) {
                 let p = players[i];
@@ -5242,46 +5251,42 @@ self.onmessage = function(e) {
 
                 let insideCloud = false;
                 const camPos = me.camera.position;
-                let nearCloud = false;
-                
+
+                // InstancedMesh.raycast walks every cloud whenever the camera is
+                // near just one of them. First apply the same broad-phase distance
+                // check per instance, then run the unchanged winding test against
+                // only those candidates. The test geometry and matrices are shared
+                // with the rendered clouds, so the whiteout boundary is identical.
+                _raycaster.set(camPos, _rayDirUp);
+                let windingNumber = 0;
+                const rayDir = _raycaster.ray.direction;
                 for (let i = 0; i < cloudsData.length; i++) {
                     const c = cloudsData[i];
-                    const distSq = (camPos.x - c.x) ** 2 + (camPos.y - c.y) ** 2 + (camPos.z - c.z) ** 2;
-                    if (distSq < cloudBaseRadiusSq * (c.scale * c.scale) * 1.5) {
-                        nearCloud = true;
-                        break;
-                    }
-                }
+                    const dx = camPos.x - c.x;
+                    const dy = camPos.y - c.y;
+                    const dz = camPos.z - c.z;
+                    if (dx * dx + dy * dy + dz * dz >= cloudBaseRadiusSq * c.scale * c.scale * 1.5) continue;
 
-                if (nearCloud) {
-                    _raycaster.set(camPos, _rayDirUp);
-                    
-                    const intersects = _raycaster.intersectObject(cloudInstancedMesh, false);
-                    
-                    let windingNumber = 0;
-                    const rayDir = _raycaster.ray.direction;
-                    
-                    for (let i = 0; i < intersects.length; i++) {
-                        const hit = intersects[i];
+                    cloudInstancedMesh.getMatrixAt(i, _instanceMatrix);
+                    cloudRaycastMesh.matrixWorld.copy(_instanceMatrix);
+                    _normalMatrix.getNormalMatrix(_instanceMatrix);
+                    _cloudIntersections.length = 0;
+                    _raycaster.intersectObject(cloudRaycastMesh, false, _cloudIntersections);
+
+                    for (let j = 0; j < _cloudIntersections.length; j++) {
+                        const hit = _cloudIntersections[j];
                         if (!hit.face) continue;
 
-                        cloudInstancedMesh.getMatrixAt(hit.instanceId, _instanceMatrix);
-                        _normalMatrix.getNormalMatrix(_instanceMatrix);
-                        
                         _tempVec.copy(hit.face.normal).applyMatrix3(_normalMatrix).normalize();
                         const dot = rayDir.dot(_tempVec);
-                        
                         if (dot > 0.0001) {
-                            windingNumber -= 1; 
+                            windingNumber -= 1;
                         } else if (dot < -0.0001) {
-                            windingNumber += 1; 
+                            windingNumber += 1;
                         }
                     }
-                    
-                    if (windingNumber !== 0) {
-                        insideCloud = true;
-                    }
                 }
+                insideCloud = windingNumber !== 0;
                 
                 if (insideCloud !== _hudCache.cloudWhiteout) {
                     _DOM.cloudWhiteoutStyle.display = insideCloud ? 'block' : 'none';
@@ -5304,10 +5309,7 @@ self.onmessage = function(e) {
 
             resizeUI3D();
 
-            let me = null;
-            for (let i = 0; i < players.length; i++) {
-                if (players[i].index === myPlayerIndex) { me = players[i]; break; }
-            }
+            const me = localPlayer;
             
             if (me) {
                 me.camera.aspect = width / height;
