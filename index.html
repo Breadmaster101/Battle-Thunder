@@ -466,6 +466,20 @@
         #start-btn:hover::before {
             width: 0%;
         }
+        /* ----- FPS COUNTER ----- */
+        #fps-counter {
+            position: absolute;
+            top: 0;
+            right: 0;
+            margin: 0;
+            padding: 2px 4px;
+            color: #ffffff;
+            font-family: 'Inter', sans-serif;
+            font-size: 0.8rem;
+            z-index: 9999;
+            pointer-events: none;
+            user-select: none;
+        }
         /* ----- END MODERN UI OVERLAYS ----- */
 
         /* ----- VOLUME CONTROL UI ----- */
@@ -871,12 +885,14 @@
 
 <body>
 
+    <div id="fps-counter">0</div>
+
     <div id="volume-control">
         <svg id="volume-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
             <path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"></path>
         </svg>
-        <input type="range" id="volume-slider" min="0" max="1" step="0.01" value="1">
+        <input type="range" id="volume-slider" min="0" max="1" step="0.01" value="0">
     </div>
 
     <div id="cloud-whiteout" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(200, 200, 200, 0.95); z-index: 50; display: none; pointer-events: none;"></div>
@@ -1061,6 +1077,25 @@
         const _cineStartOffset = new THREE.Vector3();
         const _cineLocalLookAt = new THREE.Vector3();
         const _cineEndLookAt = new THREE.Vector3();
+
+        // --- FPS COUNTER (independent of game state) ---
+        (function() {
+            const fpsEl = document.getElementById('fps-counter');
+            let frames = 0;
+            let lastTime = performance.now();
+            function tickFPS() {
+                frames++;
+                const now = performance.now();
+                const elapsed = now - lastTime;
+                if (elapsed >= 500) {
+                    fpsEl.textContent = Math.round((frames * 1000) / elapsed);
+                    frames = 0;
+                    lastTime = now;
+                }
+                requestAnimationFrame(tickFPS);
+            }
+            requestAnimationFrame(tickFPS);
+        })();
 
         // --- CUSTOM UI NOTIFICATIONS ---
         let alertTimeout;
@@ -1880,7 +1915,7 @@
         masterCompressor.release.setValueAtTime(0.25, audioCtx.currentTime);
 
         const masterVolume = audioCtx.createGain();
-        masterVolume.gain.setValueAtTime(1.0, audioCtx.currentTime);
+        masterVolume.gain.setValueAtTime(0.0, audioCtx.currentTime);
 
         masterCompressor.connect(masterVolume);
         masterVolume.connect(audioCtx.destination);
@@ -1899,11 +1934,30 @@
         masterReverb.connect(reverbMix);
         reverbMix.connect(masterCompressor);
 
+        const VOLUME_STORAGE_KEY = 'bt-volume';
+
+        function loadSavedVolume() {
+            const raw = localStorage.getItem(VOLUME_STORAGE_KEY);
+            const val = parseFloat(raw);
+            return (raw !== null && !isNaN(val) && val >= 0 && val <= 1) ? val : 0;
+        }
+
+        function saveVolume(val) {
+            try {
+                localStorage.setItem(VOLUME_STORAGE_KEY, String(val));
+            } catch (e) { /* storage unavailable (private mode, etc.) */ }
+        }
+
         document.addEventListener("DOMContentLoaded", () => {
             const volSlider = document.getElementById('volume-slider');
             const volIcon = document.getElementById('volume-icon');
-            let isMuted = false;
-            let preMuteVol = 1.0;
+
+            const savedVol = loadSavedVolume();
+            let isMuted = savedVol === 0;
+            let preMuteVol = savedVol || 1.0;
+
+            volSlider.value = savedVol;
+            masterVolume.gain.setValueAtTime(savedVol, audioCtx.currentTime);
 
             function updateVolumeIcon(val) {
                 if (val === 0) {
@@ -1915,12 +1969,15 @@
                 }
             }
 
+            updateVolumeIcon(savedVol);
+
             volSlider.addEventListener('input', (e) => {
                 resumeAudio();
                 const val = parseFloat(e.target.value);
                 masterVolume.gain.setValueAtTime(val, audioCtx.currentTime);
                 isMuted = val === 0;
                 updateVolumeIcon(val);
+                saveVolume(val);
             });
 
             volIcon.addEventListener('click', () => {
@@ -1930,12 +1987,14 @@
                     volSlider.value = preMuteVol;
                     isMuted = false;
                     updateVolumeIcon(preMuteVol);
+                    saveVolume(preMuteVol);
                 } else {
                     preMuteVol = parseFloat(volSlider.value) || 1.0;
                     masterVolume.gain.setValueAtTime(0, audioCtx.currentTime);
                     volSlider.value = 0;
                     isMuted = true;
                     updateVolumeIcon(0);
+                    saveVolume(0);
                 }
             });
         });
