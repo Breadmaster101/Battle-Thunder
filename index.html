@@ -1006,6 +1006,7 @@
         <b>FLIGHT CONTROLS</b>
         <span class="highlight-key">[W/S]</span> OR <span class="highlight-key">[↑/↓]</span> PITCH<br>
         <span class="highlight-key">[A/D]</span> OR <span class="highlight-key">[←/→]</span> ROLL<br>
+        <span class="highlight-key">[Q/E]</span> YAW<br>
         <span class="highlight-key">[SHIFT]</span> THROTTLE UP<br>
         <span class="highlight-key">[SPACE]</span> THROTTLE DOWN<br>
         <span class="highlight-key">[B]</span> HOLD TO LOOK BACK<br>
@@ -1981,6 +1982,7 @@ uniform vec2 csmSplits[ CSM_CASCADES ];
         const inputState = {
             pitchDown: false, pitchUp: false,
             rollLeft: false, rollRight: false,
+            yawLeft: false, yawRight: false,
             throttleUp: false, throttleDown: false,
             shoot: false,
             lookBack: false
@@ -2150,15 +2152,18 @@ uniform vec2 csmSplits[ CSM_CASCADES ];
             inputState.pitchUp = false;
             inputState.rollLeft = false;
             inputState.rollRight = false;
+            inputState.yawLeft = false;
+            inputState.yawRight = false;
             inputState.throttleUp = false;
             inputState.throttleDown = false;
             inputState.shoot = false;
             inputState.lookBack = false;
-            
+
             const me = localPlayer;
             if (me) {
                 me.inputs.pitch = 0;
                 me.inputs.roll = 0;
+                me.inputs.yaw = 0;
                 me.inputs.throttle = 0;
                 me.inputs.shoot = false;
             }
@@ -4639,10 +4644,12 @@ uniform vec2 csmSplits[ CSM_CASCADES ];
 
                 this.smoothedPitch = 0;
                 this.smoothedRoll = 0;
+                this.smoothedYaw = 0;
+                this.yawVelocity = 0;
                 this.virtualChasePos = null;
 
                 this.inputs = {
-                    pitch: 0, roll: 0, throttle: 0, shoot: false, reset: false
+                    pitch: 0, roll: 0, yaw: 0, throttle: 0, shoot: false, reset: false
                 };
 
                 this.engineSound = new EngineSound(isLocal);
@@ -5009,6 +5016,8 @@ uniform vec2 csmSplits[ CSM_CASCADES ];
                 this.throttle = 0.5;
                 this.smoothedPitch = 0;
                 this.smoothedRoll = 0;
+                this.smoothedYaw = 0;
+                this.yawVelocity = 0;
                 this.hp = 100;
                 this.currentAmmo = this.maxAmmo;
                 this.isReloading = false;
@@ -5041,12 +5050,14 @@ uniform vec2 csmSplits[ CSM_CASCADES ];
 
                 let effPitch = this.inputs.pitch;
                 let effRoll = this.inputs.roll;
+                let effYaw = this.inputs.yaw;
                 let effThrottle = this.inputs.throttle;
                 let effShoot = this.inputs.shoot;
 
                 if (this.isLocal && typeof introCinematicActive !== 'undefined' && introCinematicActive) {
                     effPitch = 0;
                     effRoll = 0;
+                    effYaw = 0;
                     effThrottle = 0;
                     effShoot = false;
                 }
@@ -5065,7 +5076,7 @@ uniform vec2 csmSplits[ CSM_CASCADES ];
                 const parasiticDrag = (this.speed * this.speed) * 0.0028 * timeScale;
                 this.speed -= parasiticDrag;
 
-                const maneuveringDrag = (Math.abs(this.smoothedPitch) * 0.005 + Math.abs(this.smoothedRoll) * 0.002) * timeScale;
+                const maneuveringDrag = (Math.abs(this.smoothedPitch) * 0.005 + Math.abs(this.smoothedRoll) * 0.002 + Math.abs(this.smoothedYaw) * 0.002) * timeScale;
                 this.speed -= maneuveringDrag;
 
                 this.speed = Math.max(0.1, this.speed);
@@ -5082,12 +5093,29 @@ uniform vec2 csmSplits[ CSM_CASCADES ];
                 const lerpAlpha = 1.0 - Math.pow(0.88, timeScale);
                 this.smoothedPitch = THREE.MathUtils.lerp(this.smoothedPitch, effPitch, lerpAlpha);
                 this.smoothedRoll = THREE.MathUtils.lerp(this.smoothedRoll, effRoll, lerpAlpha);
+                // Yaw runs through an underdamped spring instead of a plain lerp so the
+                // nose overshoots slightly and settles back when rudder is applied and
+                // released - the transient sway a real tail gives you.
+                const yawStiffness = 0.06;
+                const yawDamping = 0.25;
+                this.yawVelocity += ((effYaw - this.smoothedYaw) * yawStiffness - this.yawVelocity * yawDamping) * timeScale;
+                this.smoothedYaw += this.yawVelocity * timeScale;
 
                 let effectiveTurnSpeed = this.isStalled ? turnSpeed * 0.4 : turnSpeed;
                 const scaledTurn = effectiveTurnSpeed * timeScale;
 
                 if (Math.abs(this.smoothedPitch) > 0.001) this.mesh.rotateX(this.smoothedPitch * scaledTurn);
                 if (Math.abs(this.smoothedRoll) > 0.001) this.mesh.rotateZ(this.smoothedRoll * scaledTurn * 6.0);
+                if (Math.abs(this.smoothedYaw) > 0.001 || Math.abs(this.yawVelocity) > 0.0005) {
+                    // Rudder alone barely turns a plane - most of the yaw authority
+                    // real rudders have goes into a sideslip, not heading change.
+                    this.mesh.rotateY(this.smoothedYaw * scaledTurn * 0.15);
+                    // The nose swings but momentum carries the plane straight on, so it
+                    // skids to the outside of the yaw. The velocity term only bites
+                    // while the rudder is loading up or unloading, so the sway shows up
+                    // on input and release, not while it is held steady.
+                    this.mesh.translateX((this.smoothedYaw * 0.06 + this.yawVelocity * 1.2) * timeScale);
+                }
 
                 this.mesh.translateZ(-this.speed * timeScale);
 
@@ -6820,6 +6848,8 @@ self.onmessage = function(e) {
             if (code === 'KeyS' || code === 'ArrowDown') inputState.pitchUp = state;
             if (code === 'KeyA' || code === 'ArrowLeft') inputState.rollLeft = state;
             if (code === 'KeyD' || code === 'ArrowRight') inputState.rollRight = state;
+            if (code === 'KeyQ') inputState.yawLeft = state;
+            if (code === 'KeyE') inputState.yawRight = state;
             if (code === 'ShiftLeft' || code === 'ShiftRight') inputState.throttleUp = state;
             if (code === 'Space') inputState.throttleDown = state;
             if (code === 'KeyF' || code === 'Enter') inputState.shoot = state;
@@ -6830,6 +6860,7 @@ self.onmessage = function(e) {
                 me.inputs = {
                     pitch: (inputState.pitchDown ? -1 : 0) + (inputState.pitchUp ? 1 : 0),
                     roll: (inputState.rollLeft ? 1 : 0) + (inputState.rollRight ? -1 : 0),
+                    yaw: (inputState.yawLeft ? 1 : 0) + (inputState.yawRight ? -1 : 0),
                     throttle: (inputState.throttleUp ? 1 : 0) + (inputState.throttleDown ? -1 : 0),
                     shoot: inputState.shoot,
                     reset: false
