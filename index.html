@@ -1948,6 +1948,16 @@ uniform vec2 csmSplits[ CSM_CASCADES ];
         const WORLD_SIZE = CONFIG.width;
         const SOCKET_URL = "https://quicklash-server.onrender.com";
 
+        // Objects that also live on this layer are drawn a second time, alone, into a
+        // quarter-resolution target that gets blurred and added back over the frame.
+        // Only the handful of things that should glow are on it, so the extra pass
+        // costs a few dozen instanced quads rather than a second scene render.
+        const BLOOM_LAYER = 1;
+
+        // World-space direction *towards* the sun, matching the sky dome and the
+        // shadow cascade light direction. Used for the water's specular glitter.
+        const SUN_DIR = new THREE.Vector3(800, 500, -800).normalize();
+
         const _audioForward = new THREE.Vector3();
         const _audioUp = new THREE.Vector3();
         const _hudCache = { speed: -1, throt: -1, alt: -1, hdg: -1, hp: -1, stall: null, ammo: -1, reloading: null, cloudWhiteout: false };
@@ -1978,6 +1988,11 @@ uniform vec2 csmSplits[ CSM_CASCADES ];
         const NETWORK_TICK_RATE = 50;
 
         let scene, renderer;
+        // Bed depth over the whole map, sampled per fragment by the water shader so the
+        // shoreline is not quantised to the water mesh's 140-unit quads.
+        let shoreTexture = null;
+        let shoreRangeUnits = 60;
+        let shoreDistRangeUnits = 320;
         let waterMeshes = [];
         let cloudsData = [];
         let cloudInstancedMesh;
@@ -3863,6 +3878,9 @@ uniform vec2 csmSplits[ CSM_CASCADES ];
                     baseOpacity: 1,
                     isFlame: false,
                     isWater: false,
+                    // 0 = never contributes to the bloom pass, 1 = full contribution.
+                    // Lets fire and dirt share one pool without dirt glowing.
+                    bloom: 0,
                     poolItem: null
                 };
             }
@@ -3912,6 +3930,47 @@ uniform vec2 csmSplits[ CSM_CASCADES ];
                 this.mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(maxSize * 3), 3);
                 this.alphaAttr = new THREE.InstancedBufferAttribute(new Float32Array(maxSize), 1);
                 geometry.setAttribute('instanceAlpha', this.alphaAttr);
+                this.bloomAttr = new THREE.InstancedBufferAttribute(new Float32Array(maxSize), 1);
+                geometry.setAttribute('instanceBloom', this.bloomAttr);
+
+                // A twin that reuses the *same* instance buffers - commit() fills them
+                // once and both meshes read them, so the bloom pass adds no per-particle
+                // CPU work. It only exists on BLOOM_LAYER, so the main camera skips it
+                // and the bloom camera sees nothing else from this pool.
+                this.bloomMaterial = new THREE.MeshBasicMaterial({
+                    fog: false,
+                    toneMapped: false,
+                    depthWrite: false,
+                    depthTest: false,
+                    transparent: true,
+                    blending: THREE.CustomBlending,
+                    blendSrc: THREE.OneFactor,
+                    blendDst: THREE.OneFactor
+                });
+                this.bloomMaterial.customProgramCacheKey = () => 'instancedParticleBloom';
+                this.bloomMaterial.onBeforeCompile = (shader) => {
+                    shader.vertexShader = 'attribute float instanceAlpha;\nattribute float instanceBloom;\nvarying float vBloomWeight;\n' +
+                        shader.vertexShader.replace(
+                            '#include <begin_vertex>',
+                            '#include <begin_vertex>\n\tvBloomWeight = instanceAlpha * instanceBloom;'
+                        );
+                    // Output is already premultiplied, which is why the blend factors
+                    // above are One/One rather than SrcAlpha/One.
+                    shader.fragmentShader = 'varying float vBloomWeight;\n' +
+                        shader.fragmentShader.replace(
+                            'vec4 diffuseColor = vec4( diffuse, opacity );',
+                            'vec4 diffuseColor = vec4( diffuse * vBloomWeight * 1.9, 1.0 );'
+                        );
+                };
+
+                this.bloomMesh = new THREE.InstancedMesh(geometry, this.bloomMaterial, maxSize);
+                this.bloomMesh.instanceMatrix = this.mesh.instanceMatrix;
+                this.bloomMesh.instanceColor = this.mesh.instanceColor;
+                this.bloomMesh.count = 0;
+                this.bloomMesh.frustumCulled = false;
+                this.bloomMesh.matrixAutoUpdate = false;
+                this.bloomMesh.updateMatrix();
+                this.bloomMesh.layers.set(BLOOM_LAYER);
 
                 for (let i = 0; i < maxSize; i++) {
                     const p = new PooledParticle();
@@ -3994,11 +4053,13 @@ uniform vec2 csmSplits[ CSM_CASCADES ];
 
                 const count = order.length;
                 this.mesh.count = count;
+                this.bloomMesh.count = count;
                 if (count === 0) return;
 
                 const mArr = this.mesh.instanceMatrix.array;
                 const cArr = this.mesh.instanceColor.array;
                 const aArr = this.alphaAttr.array;
+                const bArr = this.bloomAttr.array;
 
                 for (let i = 0; i < count; i++) {
                     const p = order[i];
@@ -4009,6 +4070,7 @@ uniform vec2 csmSplits[ CSM_CASCADES ];
                     const c3 = i * 3;
                     cArr[c3] = c.r; cArr[c3 + 1] = c.g; cArr[c3 + 2] = c.b;
                     aArr[i] = p.material.opacity;
+                    bArr[i] = p.userData.bloom;
                 }
 
                 // Only the slots actually in use are re-uploaded.
@@ -4018,6 +4080,8 @@ uniform vec2 csmSplits[ CSM_CASCADES ];
                 this.mesh.instanceColor.updateRange.count = count * 3;
                 this.alphaAttr.needsUpdate = true;
                 this.alphaAttr.updateRange.count = count;
+                this.bloomAttr.needsUpdate = true;
+                this.bloomAttr.updateRange.count = count;
             }
             // Puts a few instances on screen so the driver builds the real pipeline
             // during the loading screen rather than on the first explosion.
@@ -4030,14 +4094,18 @@ uniform vec2 csmSplits[ CSM_CASCADES ];
                     _particleMatrix.toArray(mArr, i * 16);
                     cArr[i * 3] = 1; cArr[i * 3 + 1] = 1; cArr[i * 3 + 2] = 1;
                     this.alphaAttr.array[i] = 0.01;
+                    this.bloomAttr.array[i] = 0.01;
                 }
                 this.mesh.count = n;
+                this.bloomMesh.count = n;
                 this.mesh.instanceMatrix.needsUpdate = true;
                 this.mesh.instanceColor.needsUpdate = true;
                 this.alphaAttr.needsUpdate = true;
+                this.bloomAttr.needsUpdate = true;
             }
             endWarmUp() {
                 this.mesh.count = 0;
+                this.bloomMesh.count = 0;
             }
         }
         
@@ -4061,6 +4129,7 @@ uniform vec2 csmSplits[ CSM_CASCADES ];
                     );
                     mesh.userData.life = 1.0;
                     mesh.userData.rotSpeed = (Math.random() - 0.5) * 0.2;
+                    mesh.userData.bloom = 1.0;
                     mesh.visible = true;
                     this.particles.push(mesh);
                 }
@@ -4074,6 +4143,9 @@ uniform vec2 csmSplits[ CSM_CASCADES ];
                         p.rotation.x += p.userData.rotSpeed * timeScale;
                         p.userData.life -= 0.03 * timeScale;
                         p.scale.setScalar(p.userData.life * 3);
+                        // Fading the alpha as well as the scale means the glow this
+                        // feeds into the bloom pass ramps down instead of popping out.
+                        p.material.opacity = Math.min(1.0, p.userData.life * 1.6);
                         active = true;
                     } else if (p.visible) { 
                         boxParticlePool.release(p); 
@@ -4107,6 +4179,7 @@ uniform vec2 csmSplits[ CSM_CASCADES ];
                     );
                     mesh.userData.life = 1.0;
                     mesh.userData.rotSpeed = (Math.random() - 0.5) * 0.4;
+                    mesh.userData.bloom = 0.0;
                     mesh.visible = true;
                     this.particles.push(mesh);
                 }
@@ -4116,7 +4189,7 @@ uniform vec2 csmSplits[ CSM_CASCADES ];
                 for (let i = 0; i < this.particles.length; i++) {
                     let p = this.particles[i];
                     if (p.userData.life > 0) {
-                        p.userData.velocity.y -= 0.15 * timeScale; 
+                        p.userData.velocity.y -= 0.15 * timeScale;
                         p.position.addScaledVector(p.userData.velocity, timeScale);
                         p.rotation.x += p.userData.rotSpeed * timeScale;
                         p.userData.life -= 0.04 * timeScale;
@@ -4154,6 +4227,7 @@ uniform vec2 csmSplits[ CSM_CASCADES ];
                     );
                     mesh.userData.life = 1.0;
                     mesh.userData.rotSpeed = (Math.random() - 0.5) * 0.4;
+                    mesh.userData.bloom = 0.0;
                     mesh.visible = true;
                     this.particles.push(mesh);
                 }
@@ -4163,7 +4237,7 @@ uniform vec2 csmSplits[ CSM_CASCADES ];
                 for (let i = 0; i < this.particles.length; i++) {
                     let p = this.particles[i];
                     if (p.userData.life > 0) {
-                        p.userData.velocity.y -= 0.08 * timeScale; 
+                        p.userData.velocity.y -= 0.08 * timeScale;
                         p.position.addScaledVector(p.userData.velocity, timeScale);
                         p.rotation.x += p.userData.rotSpeed * timeScale;
                         p.userData.life -= 0.05 * timeScale;
@@ -4185,7 +4259,252 @@ uniform vec2 csmSplits[ CSM_CASCADES ];
         }
 
         const _sharedProjGeo = new THREE.BoxGeometry(0.3, 0.3, 4);
-        const _sharedProjMat = new THREE.MeshBasicMaterial({ color: 0xffffaa });
+        // ---------------------------------------------------------------------
+        // Wreckage.
+        //
+        // A downed plane is replaced by eight rigid chunks that keep the velocity
+        // the aircraft had at the moment of the kill, tumble, and fall under
+        // gravity until they hit terrain or water. The chunk geometries are built
+        // once and shared by every wreck; only the eight Mesh wrappers and their
+        // integrator state are per-death, so the cost is eight extra draw calls
+        // (four of which cast shadows) for the few seconds the debris is airborne.
+        // ---------------------------------------------------------------------
+        const WRECK_GRAVITY = 0.032;      // units per frame^2, at the game's 1/60s step
+        const WRECK_DRAG = 0.0035;        // fraction of velocity shed per frame
+        const WRECK_SETTLE_TIME = 4.5;    // seconds the debris lingers once it lands
+        const WRECK_MAX_LIFE = 9.0;       // seconds, a hard ceiling on stragglers
+        let _wreckChunkGeos = null;
+        const _wreckQuat = new THREE.Quaternion();
+        const _wreckVec = new THREE.Vector3();
+        const _wreckForward = new THREE.Vector3();
+
+        // Each chunk's geometry is centred on its own origin so it tumbles about
+        // itself; `origin` carries where it sat on the intact aircraft.
+        function buildWreckChunkGeometries() {
+            if (_wreckChunkGeos) return _wreckChunkGeos;
+
+            const nose = new THREE.CylinderGeometry(0.9, 0.8, 3.5, 8);
+            nose.rotateX(Math.PI / 2);
+
+            const midBody = new THREE.CylinderGeometry(1.1, 0.9, 7, 8);
+            midBody.rotateX(Math.PI / 2);
+
+            const tailBoom = new THREE.CylinderGeometry(0.4, 1.1, 6, 8);
+            tailBoom.rotateX(Math.PI / 2);
+
+            const wing = new THREE.BoxGeometry(7, 0.2, 3);
+            const hStab = new THREE.BoxGeometry(5, 0.15, 2);
+
+            const cockpit = new THREE.SphereGeometry(1.1, 6, 6);
+            cockpit.scale(1, 0.8, 2.5);
+
+            const spinner = new THREE.CylinderGeometry(0.8, 0.1, 2, 8);
+            spinner.rotateX(Math.PI / 2);
+
+            const vStab = new THREE.BoxGeometry(0.2, 3, 2.5);
+
+            _wreckChunkGeos = [
+                { geo: midBody,  mat: 'body',      origin: new THREE.Vector3(0, 0, 0),        big: true },
+                { geo: nose,     mat: 'body',      origin: new THREE.Vector3(0, 0, -5.25),    big: true },
+                { geo: tailBoom, mat: 'body',      origin: new THREE.Vector3(0, 0, 6.5),      big: true },
+                { geo: wing,     mat: 'body',      origin: new THREE.Vector3(4.3, -0.2, -0.5), big: true },
+                { geo: wing,     mat: 'body',      origin: new THREE.Vector3(-4.3, -0.2, -0.5), big: true },
+                { geo: hStab,    mat: 'body',      origin: new THREE.Vector3(0, 0.28, 9.5),   big: false },
+                { geo: vStab,    mat: 'highlight', origin: new THREE.Vector3(0, 2.0, 8.5),    big: false },
+                { geo: spinner,  mat: 'highlight', origin: new THREE.Vector3(0, 0, -8),       big: false },
+                { geo: cockpit,  mat: 'glass',     origin: new THREE.Vector3(0, 0.8, -0.5),   big: false }
+            ];
+            return _wreckChunkGeos;
+        }
+
+        class PlaneWreck {
+            // `sourceMesh` must already have an up-to-date world matrix; `speed` is the
+            // aircraft's forward speed in units per frame, before explode() zeroes it.
+            constructor(sourceMesh, speed, materials) {
+                this.chunks = [];
+                this.particles = [];
+                this.age = 0;
+                this.smokeAccumulator = 0;
+                this.impacted = false;
+
+                _wreckForward.set(0, 0, -1).applyQuaternion(sourceMesh.quaternion);
+                const defs = buildWreckChunkGeometries();
+
+                for (let i = 0; i < defs.length; i++) {
+                    const def = defs[i];
+                    const mat = def.mat === 'highlight' ? materials.highlight
+                              : def.mat === 'glass' ? materials.glass
+                              : materials.body;
+
+                    const mesh = new THREE.Mesh(def.geo, mat);
+                    // Only the large pieces cast - the small ones are barely a pixel
+                    // of shadow each and every caster is resubmitted per cascade.
+                    mesh.castShadow = def.big;
+                    mesh.receiveShadow = false;
+
+                    mesh.position.copy(def.origin).applyMatrix4(sourceMesh.matrixWorld);
+                    mesh.quaternion.copy(sourceMesh.quaternion);
+
+                    // Inherited momentum, plus a blast impulse pushing each piece away
+                    // from the fuselage centreline so the plane visibly comes apart
+                    // rather than drifting along as a loose formation.
+                    const velocity = _wreckForward.clone().multiplyScalar(speed * 0.88);
+                    _wreckVec.copy(def.origin).normalize().applyQuaternion(sourceMesh.quaternion);
+                    velocity.addScaledVector(_wreckVec, 0.22 + Math.random() * 0.30);
+                    velocity.x += (Math.random() - 0.5) * 0.36;
+                    velocity.y += (Math.random() - 0.5) * 0.36 + 0.18;
+                    velocity.z += (Math.random() - 0.5) * 0.36;
+
+                    scene.add(mesh);
+                    this.chunks.push({
+                        mesh: mesh,
+                        velocity: velocity,
+                        spinAxis: new THREE.Vector3(
+                            Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5
+                        ).normalize(),
+                        spinRate: (0.03 + Math.random() * 0.09) * (Math.random() < 0.5 ? -1 : 1),
+                        big: def.big,
+                        landed: false,
+                        hasImpacted: false,
+                        bounces: 0
+                    });
+                }
+            }
+
+            spawnParticle(position, isFire) {
+                const p = sphereParticlePool.get();
+                if (!p) return;
+                if (isFire) {
+                    p.material.color.setHex(Math.random() < 0.5 ? 0xff7722 : 0xffcc33);
+                    p.material.opacity = 0.9;
+                    p.scale.setScalar(1.4 + Math.random() * 1.6);
+                    p.userData.bloom = 1.0;
+                    p.userData.life = 0.55 + Math.random() * 0.3;
+                } else {
+                    p.material.color.setHex(0x3a3a3a);
+                    p.material.opacity = 0.55;
+                    p.scale.setScalar(2.0 + Math.random() * 2.0);
+                    p.userData.bloom = 0.0;
+                    p.userData.life = 1.0;
+                }
+                p.position.copy(position);
+                p.userData.velocity.set(
+                    (Math.random() - 0.5) * 0.5,
+                    0.25 + Math.random() * 0.35,
+                    (Math.random() - 0.5) * 0.5
+                );
+                p.userData.baseOpacity = p.material.opacity;
+                p.visible = true;
+                this.particles.push(p);
+            }
+
+            update(timeScale) {
+                this.age += 0.016 * timeScale;
+
+                let airborne = 0;
+                const dragFactor = 1.0 - WRECK_DRAG * timeScale;
+
+                for (let i = 0; i < this.chunks.length; i++) {
+                    const c = this.chunks[i];
+                    if (c.landed) continue;
+
+                    c.velocity.y -= WRECK_GRAVITY * timeScale;
+                    c.velocity.multiplyScalar(dragFactor);
+                    c.mesh.position.addScaledVector(c.velocity, timeScale);
+
+                    _wreckQuat.setFromAxisAngle(c.spinAxis, c.spinRate * timeScale);
+                    c.mesh.quaternion.multiply(_wreckQuat);
+
+                    const pos = c.mesh.position;
+                    const ground = getVisualTerrainHeight(pos.x, pos.z);
+                    const overWater = ground < CONFIG.waterLevel;
+                    const floor = overWater ? CONFIG.waterLevel : ground;
+
+                    if (pos.y <= floor) {
+                        pos.y = floor;
+
+                        if (!c.hasImpacted) {
+                            c.hasImpacted = true;
+                            if (overWater) {
+                                explosions.push(new WaterSplash(pos));
+                            } else {
+                                explosions.push(new DirtPuff(pos));
+                            }
+                            // One report for the whole wreck, from whichever piece
+                            // lands first, rather than nine overlapping impacts.
+                            if (!this.impacted) {
+                                this.impacted = true;
+                                explosions.push(new Explosion(pos, 0xff8800));
+                                SoundGen.playExplosion(pos);
+                            }
+                        }
+
+                        // A couple of damped bounces, then the piece settles. Without
+                        // this a plane flown straight into a hillside would have every
+                        // chunk touch down on the first frame and the wreck would be
+                        // gone before it was ever visible.
+                        if (c.bounces < 2 && Math.abs(c.velocity.y) > 0.25) {
+                            c.bounces++;
+                            c.velocity.y = Math.abs(c.velocity.y) * 0.32;
+                            c.velocity.x *= 0.55;
+                            c.velocity.z *= 0.55;
+                            c.spinRate *= 0.45;
+                            airborne++;
+                        } else {
+                            c.landed = true;
+                            c.velocity.set(0, 0, 0);
+                        }
+                    } else {
+                        airborne++;
+                    }
+                }
+
+                // Fire and smoke stream off the large pieces while they fall.
+                this.smokeAccumulator += timeScale;
+                if (this.smokeAccumulator >= 2.0 && this.age < 6.0) {
+                    this.smokeAccumulator = 0;
+                    for (let i = 0; i < this.chunks.length; i++) {
+                        const c = this.chunks[i];
+                        if (!c.big || c.landed) continue;
+                        this.spawnParticle(c.mesh.position, Math.random() < 0.45);
+                    }
+                }
+
+                for (let i = this.particles.length - 1; i >= 0; i--) {
+                    const p = this.particles[i];
+                    p.userData.life -= 0.022 * timeScale;
+                    p.position.addScaledVector(p.userData.velocity, timeScale);
+                    p.scale.multiplyScalar(1.0 + 0.035 * timeScale);
+                    p.material.opacity = Math.max(0, p.userData.life) * p.userData.baseOpacity;
+                    if (p.userData.life <= 0) {
+                        sphereParticlePool.release(p);
+                        this.particles[i] = this.particles[this.particles.length - 1];
+                        this.particles.pop();
+                    }
+                }
+
+                if (this.age > WRECK_MAX_LIFE) return false;
+                // Settled wreckage is left lying on the ground for a beat rather than
+                // blinking out the moment the last piece stops moving.
+                return this.age < WRECK_SETTLE_TIME || airborne > 0 || this.particles.length > 0;
+            }
+
+            dispose() {
+                for (let i = 0; i < this.chunks.length; i++) {
+                    scene.remove(this.chunks[i].mesh);
+                }
+                this.chunks.length = 0;
+                for (let i = 0; i < this.particles.length; i++) {
+                    sphereParticlePool.release(this.particles[i]);
+                }
+                this.particles.length = 0;
+            }
+        }
+
+        // toneMapped is off so tracers stay at full brightness going into the bloom
+        // extract; fog is off so a distant round glows yellow rather than picking up
+        // the near-white fog colour and blooming as a white smear.
+        const _sharedProjMat = new THREE.MeshBasicMaterial({ color: 0xffffaa, fog: false, toneMapped: false });
         class Projectile {
             constructor() {
                 this.isActive = false;
@@ -4195,6 +4514,9 @@ uniform vec2 csmSplits[ CSM_CASCADES ];
                 this.hitType = null;
                 this.isLocalOrHostAI = false;
                 this.mesh = new THREE.Mesh(_sharedProjGeo, _sharedProjMat);
+                // enable() rather than set(): the round still draws in the main pass,
+                // and picks up a glow in the bloom pass on top of it.
+                this.mesh.layers.enable(BLOOM_LAYER);
                 this.mesh.visible = false;
                 // 250 pooled rounds live in the scene permanently; keep the renderer
                 // from walking and recomposing the idle ones. They are scene-level
@@ -4310,6 +4632,7 @@ uniform vec2 csmSplits[ CSM_CASCADES ];
                 this.kills = 0;
                 this.deaths = 0;
                 this.lastAttackerName = null;
+                this.diedByCollision = false;
                 this.lastRespawnTime = 0;
                 this.positionBuffer = [];
                 this.respawnTimer = 0;
@@ -4372,8 +4695,14 @@ uniform vec2 csmSplits[ CSM_CASCADES ];
                 });
                 
                 const glassMat = new THREE.MeshStandardMaterial({
-                    color: 0x111111, metalness: 0.9, roughness: 0.05, transparent: true, opacity: 0.4, flatShading: true
+                    color: 0x080809, metalness: 0.9, roughness: 0.05, transparent: true, opacity: 0.55, flatShading: true
                 });
+
+                // Held so the wreckage can be built out of this plane's own materials
+                // instead of allocating a matching set every time someone goes down.
+                this.bodyMat = bodyMat;
+                this.highlightMat = highlightMat;
+                this.glassMat = glassMat;
 
                 // Every part below is the same shape, in the same place, with the same
                 // material as before. The only change is that parts sharing a material
@@ -4472,8 +4801,9 @@ uniform vec2 csmSplits[ CSM_CASCADES ];
 
                 // Initialize muzzle flash to be permanently visible to avoid active-light-count shader recompilation.
                 const flashGeo = new THREE.DodecahedronGeometry(0.8, 0);
-                const flashMat = new THREE.MeshBasicMaterial({ color: 0xffff00, transparent: true, opacity: 0.0, depthWrite: false });
+                const flashMat = new THREE.MeshBasicMaterial({ color: 0xffff00, transparent: true, opacity: 0.0, depthWrite: false, fog: false, toneMapped: false });
                 this.muzzleFlash = new THREE.Mesh(flashGeo, flashMat);
+                this.muzzleFlash.layers.enable(BLOOM_LAYER);
                 this.muzzleFlash.position.set(0, 0, -10.5);
 
                 // The point light itself is shared scene-wide; see claimMuzzleLight().
@@ -4513,6 +4843,8 @@ uniform vec2 csmSplits[ CSM_CASCADES ];
                 mesh.userData.baseOpacity = opacity;
                 mesh.userData.isFlame = isFlame;
                 mesh.userData.isWater = false;
+                // Engine fire glows; smoke and contrails do not.
+                mesh.userData.bloom = isFlame ? 0.9 : 0.0;
                 mesh.visible = true;
                 this.trailParticles.push(mesh);
             }
@@ -4532,6 +4864,7 @@ uniform vec2 csmSplits[ CSM_CASCADES ];
                     meshL.userData.baseOpacity = opacity;
                     meshL.userData.isFlame = false;
                     meshL.userData.isWater = false;
+                    meshL.userData.bloom = 0.0;
                     meshL.visible = true;
                     this.trailParticles.push(meshL);
                 }
@@ -4548,6 +4881,7 @@ uniform vec2 csmSplits[ CSM_CASCADES ];
                     meshR.userData.baseOpacity = opacity;
                     meshR.userData.isFlame = false;
                     meshR.userData.isWater = false;
+                    meshR.userData.bloom = 0.0;
                     meshR.visible = true;
                     this.trailParticles.push(meshR);
                 }
@@ -4578,14 +4912,27 @@ uniform vec2 csmSplits[ CSM_CASCADES ];
                 mesh.userData.baseOpacity = opacity;
                 mesh.userData.isFlame = false;
                 mesh.userData.isWater = true;
+                mesh.userData.bloom = 0.0;
                 mesh.visible = true;
-                
+
                 this.trailParticles.push(mesh);
             }
 
             explode() {
                 if (this.isCrashed) return;
                 this.isCrashed = true;
+
+                // Captured before speed is zeroed and before the mesh is hidden: the
+                // wreckage inherits the aircraft's momentum, so it needs the state the
+                // plane was actually flying with on this frame.
+                const impactSpeed = this.speed;
+                this.mesh.updateMatrixWorld(true);
+                explosions.push(new PlaneWreck(this.mesh, impactSpeed, {
+                    body: this.bodyMat,
+                    highlight: this.highlightMat,
+                    glass: this.glassMat
+                }));
+
                 this.speed = 0;
                 this.mesh.visible = false;
                 if (this.radarBlipStyle) this.radarBlipStyle.display = 'none';
@@ -4596,7 +4943,9 @@ uniform vec2 csmSplits[ CSM_CASCADES ];
 
                 if (this.index === myPlayerIndex) {
                     const el = document.getElementById('death-reason');
-                    if (this.lastAttackerName) {
+                    if (this.diedByCollision) {
+                        el.innerText = "MID-AIR COLLISION";
+                    } else if (this.lastAttackerName) {
                         el.innerText = `SHOT DOWN BY ${this.lastAttackerName}`;
                     } else {
                         el.innerText = "YOU CRASHED";
@@ -4666,6 +5015,7 @@ uniform vec2 csmSplits[ CSM_CASCADES ];
                 this.reloadTimerStart = 0;
                 this.isCrashed = false;
                 this.lastAttackerName = null;
+                this.diedByCollision = false;
                 this.mesh.visible = true;
                 if (this.radarBlipStyle) this.radarBlipStyle.display = 'block';
                 this.engineSound.restart();
@@ -5187,9 +5537,11 @@ uniform vec2 csmSplits[ CSM_CASCADES ];
             }
 
             renderer.render(scene, me.camera);
+            renderBloom(me.camera);
             await new Promise(resolve => requestAnimationFrame(resolve));
             if (csm) csm.update();
             renderer.render(scene, me.camera);
+            renderBloom(me.camera);
         }
 
         async function initGameWorld(playerList, roomCode) {
@@ -5206,6 +5558,7 @@ uniform vec2 csmSplits[ CSM_CASCADES ];
 
             renderer = createRenderer();
             document.body.appendChild(renderer.domElement);
+            initBloom();
 
             scene = new THREE.Scene();
             scene.background = new THREE.Color(0xeaf4fc);
@@ -5223,6 +5576,8 @@ uniform vec2 csmSplits[ CSM_CASCADES ];
             sphereParticlePool = new ParticlePool(new THREE.IcosahedronGeometry(1, 0), 3000);
             scene.add(boxParticlePool.mesh);
             scene.add(sphereParticlePool.mesh);
+            scene.add(boxParticlePool.bloomMesh);
+            scene.add(sphereParticlePool.bloomMesh);
 
             for (let i = 0; i < MAX_PROJECTILES; i++) {
                 projectilePool.push(new Projectile());
@@ -5480,6 +5835,71 @@ self.onmessage = function(e) {
         gPos.setY(i, getTerrainHeight(vx, vz));
     }
 
+    // Shore map. The water surface is only 100 segments across 14km, so a river is
+    // one or two vertices wide and anything driven off a per-vertex depth snaps to
+    // that grid. This captures the bed height while it is still a regular
+    // (segments+1)^2 lattice - before toNonIndexed() shreds it into a triangle soup -
+    // so the water shader can look up depth per fragment instead. It reuses heights
+    // that were just computed, so it costs no extra noise evaluation.
+    //
+    // Encoded as depth below the surface normalised over SHORE_RANGE. The terrain
+    // generator floors the bed at waterLevel - 60, so that range covers every depth
+    // that exists and gives ~0.24 units of precision in 8 bits.
+    const SHORE_RANGE = 60;
+    const SHORE_DIST_RANGE = 320;
+    const shoreDim = CONFIG.segments + 1;
+    const shoreCell = CONFIG.width / CONFIG.segments;
+
+    const bedDepth = new Float32Array(shoreDim * shoreDim);
+    for (let i = 0; i < gPos.count; i++) {
+        bedDepth[i] = CONFIG.waterLevel - gPos.getY(i);
+    }
+
+    // Distance to the nearest land cell, by two-pass chamfer transform. Depth alone
+    // is not a usable stand-in for this: it makes the width of the foam band depend
+    // on how steeply the bed shelves, so a beach gets metres of wash while a canyon
+    // river with near-vertical banks gets a band a couple of units wide and reads as
+    // having no shoreline at all. A real distance field gives the same band width
+    // everywhere regardless of bank angle.
+    const shoreDist = new Float32Array(shoreDim * shoreDim);
+    for (let i = 0; i < shoreDist.length; i++) {
+        shoreDist[i] = bedDepth[i] > 0 ? 1e9 : 0;
+    }
+    const D1 = 1.0, D2 = Math.SQRT2;
+    for (let y = 0; y < shoreDim; y++) {
+        for (let x = 0; x < shoreDim; x++) {
+            const i = y * shoreDim + x;
+            let d = shoreDist[i];
+            if (x > 0) d = Math.min(d, shoreDist[i - 1] + D1);
+            if (y > 0) d = Math.min(d, shoreDist[i - shoreDim] + D1);
+            if (x > 0 && y > 0) d = Math.min(d, shoreDist[i - shoreDim - 1] + D2);
+            if (x < shoreDim - 1 && y > 0) d = Math.min(d, shoreDist[i - shoreDim + 1] + D2);
+            shoreDist[i] = d;
+        }
+    }
+    for (let y = shoreDim - 1; y >= 0; y--) {
+        for (let x = shoreDim - 1; x >= 0; x--) {
+            const i = y * shoreDim + x;
+            let d = shoreDist[i];
+            if (x < shoreDim - 1) d = Math.min(d, shoreDist[i + 1] + D1);
+            if (y < shoreDim - 1) d = Math.min(d, shoreDist[i + shoreDim] + D1);
+            if (x < shoreDim - 1 && y < shoreDim - 1) d = Math.min(d, shoreDist[i + shoreDim + 1] + D2);
+            if (x > 0 && y < shoreDim - 1) d = Math.min(d, shoreDist[i + shoreDim - 1] + D2);
+            shoreDist[i] = d;
+        }
+    }
+
+    // R = depth below the surface, G = distance to shore. RGBA rather than a packed
+    // two-channel format purely so the 351-wide rows stay 4-byte aligned on upload.
+    const shoreMap = new Uint8Array(shoreDim * shoreDim * 4);
+    for (let i = 0; i < shoreDim * shoreDim; i++) {
+        const dep = Math.max(0, Math.min(1, bedDepth[i] / SHORE_RANGE));
+        const dst = Math.max(0, Math.min(1, (shoreDist[i] * shoreCell) / SHORE_DIST_RANGE));
+        shoreMap[i * 4] = dep * 255;
+        shoreMap[i * 4 + 1] = dst * 255;
+        shoreMap[i * 4 + 3] = 255;
+    }
+
     self.postMessage({ status: 'GENERATING TERRAIN (2/3)...' });
     geometry.computeVertexNormals();
     geometry = geometry.toNonIndexed();
@@ -5615,6 +6035,10 @@ self.onmessage = function(e) {
         pineData: pSlice,
         decidData: dSlice,
         rockData: rSlice,
+        shoreMap: shoreMap,
+        shoreDim: shoreDim,
+        shoreRange: SHORE_RANGE,
+        shoreDistRange: SHORE_DIST_RANGE,
         pineCount, decidCount, rockCount
     }, [
         posArray.buffer,
@@ -5622,7 +6046,8 @@ self.onmessage = function(e) {
         colors.buffer,
         pSlice.buffer,
         dSlice.buffer,
-        rSlice.buffer
+        rSlice.buffer,
+        shoreMap.buffer
     ]);
 };
 `;
@@ -5634,9 +6059,26 @@ self.onmessage = function(e) {
                     if (e.data.status) {
                         if (bakeStatus) bakeStatus.innerText = e.data.status;
                     } else if (e.data.done) {
-                        const { positions, normals, colors, pineData, decidData, rockData, pineCount, decidCount, rockCount } = e.data;
+                        const { positions, normals, colors, pineData, decidData, rockData, shoreMap, shoreDim, shoreRange, shoreDistRange, pineCount, decidCount, rockCount } = e.data;
 
                         buildTerrainGrid(positions);
+
+                        // PlaneGeometry lays its vertices out row-major, and after the
+                        // rotateX(-PI/2) in the worker index ix runs +X and iy runs +Z,
+                        // which is exactly the order a DataTexture wants - so this maps
+                        // straight onto UV space with no reshuffling. Linear filtering is
+                        // the point: it turns the 40-unit lattice into a continuous field,
+                        // which is what stops the foam snapping to quad edges.
+                        shoreTexture = new THREE.DataTexture(
+                            shoreMap, shoreDim, shoreDim, THREE.RGBAFormat, THREE.UnsignedByteType
+                        );
+                        shoreTexture.minFilter = THREE.LinearFilter;
+                        shoreTexture.magFilter = THREE.LinearFilter;
+                        shoreTexture.wrapS = THREE.ClampToEdgeWrapping;
+                        shoreTexture.wrapT = THREE.ClampToEdgeWrapping;
+                        shoreTexture.needsUpdate = true;
+                        shoreRangeUnits = shoreRange;
+                        shoreDistRangeUnits = shoreDistRange;
 
                         // Lambert rather than Standard. The scene is lit by one
                         // HemisphereLight plus SunShadow's directionals, with no env map and no
@@ -5664,6 +6106,29 @@ self.onmessage = function(e) {
                             wPosBase.setX(i, vx);
                             wPosBase.setY(i, vy);
                         }
+                        // How far the sea bed sits below the surface at each vertex,
+                        // baked once here rather than sampled per frame. The plane is
+                        // authored in XY and laid flat with rotation.x = -PI/2, so a
+                        // local (x, y) lands at world (x, waterLevel, -y). Everything
+                        // the shader does that needs to know about the shoreline -
+                        // shoaling waves, the shallow-water tint and the foam band -
+                        // reads this one attribute.
+                        // Clamped at zero on purpose. A vertex sitting on a mountainside
+                        // has a bed hundreds of units *above* the surface, and letting
+                        // that through means a single triangle spanning a clifftop and a
+                        // river bed interpolates across a ~500 unit depth range. At 140
+                        // units per segment that put the entire width of a canyon river
+                        // inside the foam band, and swept the foam's ripple term through
+                        // dozens of cycles per triangle - which is what produced the
+                        // chevron banding. Land now reads as depth 0, so the gradient the
+                        // shader sees only ever spans real water.
+                        const depthBase = new Float32Array(wPosBase.count);
+                        for (let i = 0; i < wPosBase.count; i++) {
+                            const bed = getTerrainHeight(wPosBase.getX(i), -wPosBase.getY(i));
+                            depthBase[i] = Math.max(0, CONFIG.waterLevel - bed);
+                        }
+                        waterGeoBase.setAttribute('waterDepth', new THREE.BufferAttribute(depthBase, 1));
+
                         const waterGeo = waterGeoBase.toNonIndexed();
                         const wPos = waterGeo.attributes.position;
                         const wCount = wPos.count;
@@ -5691,16 +6156,126 @@ self.onmessage = function(e) {
                         waterMat.onBeforeCompile = (shader) => {
                             csmOnBeforeCompile(shader);
                             shader.uniforms.time = { value: 0 };
+                            shader.uniforms.sunDir = { value: SUN_DIR };
+                            shader.uniforms.skyReflectColor = { value: new THREE.Color(0x9fd4f5) };
+                            shader.uniforms.shallowColor = { value: new THREE.Color(0x59c6c0) };
+                            shader.uniforms.sunSpecColor = { value: new THREE.Color(0xfff2d8) };
+                            shader.uniforms.shoreMap = { value: shoreTexture };
+                            shader.uniforms.shoreRange = { value: shoreRangeUnits };
+                            shader.uniforms.shoreDistRange = { value: shoreDistRangeUnits };
+                            shader.uniforms.worldExtent = { value: CONFIG.width };
                             waterMat.userData.shader = shader;
+
+                            // Four sine components at different headings and rates. The
+                            // surface is flat-shaded, so three.js derives the normal from
+                            // screen-space derivatives of the displaced position - the
+                            // extra swell lights itself correctly with no normal work
+                            // here and no change to the vertex count.
                             shader.vertexShader = `
                                 uniform float time;
+                                attribute float waterDepth;
+                                varying float vWaveHeight;
+                                varying vec2 vSurfXZ;
                                 ${shader.vertexShader}
                             `.replace(
                                 `#include <begin_vertex>`,
                                 `
                                 #include <begin_vertex>
-                                float wave = (sin(position.x * 0.02 + time * 1.5) + cos(position.y * 0.02 + time * 1.5)) * 1.5;
+                                // Swell flattens out as the bed rises, the way real
+                                // water loses amplitude running into a beach.
+                                float shoal = clamp(waterDepth / 70.0, 0.0, 1.0);
+                                float wave = sin(position.x * 0.020 + time * 1.50) * 1.50;
+                                wave += cos(position.y * 0.017 + time * 1.30) * 1.15;
+                                wave += sin((position.x * 0.6 + position.y * 0.8) * 0.055 + time * 2.60) * 0.55;
+                                wave += cos((position.x * 0.8 - position.y * 0.6) * 0.110 + time * 3.70) * 0.26;
+                                wave *= 0.30 + 0.70 * shoal;
                                 transformed.z += wave;
+                                vWaveHeight = wave;
+                                // Surface coordinates for the foam ripple. The plane is
+                                // authored in XY, so this is world (x, -z).
+                                vSurfXZ = position.xy;
+                                `
+                            );
+
+                            // Injected ahead of tone mapping so these terms are added in
+                            // the same linear space the lighting produced, and still go
+                            // through ACES with everything else.
+                            shader.fragmentShader = `
+                                uniform float time;
+                                uniform vec3 sunDir;
+                                uniform vec3 skyReflectColor;
+                                uniform vec3 shallowColor;
+                                uniform vec3 sunSpecColor;
+                                uniform sampler2D shoreMap;
+                                uniform float shoreRange;
+                                uniform float shoreDistRange;
+                                uniform float worldExtent;
+                                varying float vWaveHeight;
+                                varying vec2 vSurfXZ;
+                                ${shader.fragmentShader}
+                            `.replace(
+                                `#include <tonemapping_fragment>`,
+                                `
+                                {
+                                    // Everything below stays in view space: vViewPosition
+                                    // already points from the fragment to the camera and
+                                    // 'normal' is the flat-shaded face normal, so no
+                                    // world-space round trip is needed.
+                                    vec3 Nv = normalize(normal);
+                                    vec3 Vv = normalize(vViewPosition);
+                                    float fresnel = pow(1.0 - clamp(dot(Nv, Vv), 0.0, 1.0), 4.0);
+
+                                    // Grazing angles hand over to the sky colour, which is
+                                    // what makes distant water read as a surface rather
+                                    // than a flat blue sheet.
+                                    gl_FragColor.rgb = mix(gl_FragColor.rgb, skyReflectColor, fresnel * 0.72);
+
+                                    // Sun glitter. A tight Blinn lobe on the wave normals
+                                    // breaks up into sparkle for free because the normals
+                                    // are already per-face.
+                                    vec3 Lv = normalize((viewMatrix * vec4(sunDir, 0.0)).xyz);
+                                    float spec = pow(max(dot(Nv, normalize(Lv + Vv)), 0.0), 200.0);
+                                    gl_FragColor.rgb += sunSpecColor * spec * 2.4;
+
+                                    // Depth is read per fragment from the baked bed map,
+                                    // not interpolated from the water mesh's corners. The
+                                    // surface is 100 quads across 14km, so a river spans
+                                    // one or two vertices and a per-vertex depth made the
+                                    // shoreline snap to whole quads - the rectangular
+                                    // patches this used to produce along narrow channels.
+                                    vec2 shoreUV = (vec2(vSurfXZ.x, -vSurfXZ.y) + worldExtent * 0.5) / worldExtent;
+                                    vec2 shoreSample = texture2D(shoreMap, shoreUV).rg;
+                                    float shoreDepth = shoreSample.r * shoreRange;
+                                    float shoreDist = shoreSample.g * shoreDistRange;
+
+                                    // Shallows go turquoise, and a band of foam rides the
+                                    // last few metres before the shoreline.
+                                    float shallow = 1.0 - clamp(shoreDepth / 50.0, 0.0, 1.0);
+                                    gl_FragColor.rgb = mix(gl_FragColor.rgb, shallowColor, shallow * shallow * 0.8);
+
+                                    // The ripple is a function of surface position, not
+                                    // depth. Driving it from depth meant its frequency
+                                    // followed the bed gradient, so anywhere the bottom
+                                    // shelved steeply it aliased into hard bands.
+                                    float ripple = 0.5 * sin(vSurfXZ.x * 0.055 + time * 2.2)
+                                                 + 0.5 * cos(vSurfXZ.y * 0.048 - time * 1.7);
+
+                                    // Rather than modulating the foam's brightness, the
+                                    // ripple pushes the waterline itself in and out. That
+                                    // is what makes the edge read as a moving wash rather
+                                    // than a contour line with a pattern painted on it.
+                                    // Measured in world units out from the waterline, so
+                                    // the band is the same width on a beach and on a
+                                    // canyon bank.
+                                    float edge = 52.0 + ripple * 20.0 + vWaveHeight * 6.0;
+                                    float foam = smoothstep(edge, 0.0, shoreDist);
+                                    gl_FragColor.rgb += vec3(foam * 0.42);
+
+                                    // Foam and grazing reflections both read as more solid
+                                    // water, so they pull the surface towards opaque.
+                                    gl_FragColor.a = clamp(gl_FragColor.a + fresnel * 0.22 + foam * 0.5, 0.0, 1.0);
+                                }
+                                #include <tonemapping_fragment>
                                 `
                             );
                         };
@@ -5927,13 +6502,25 @@ self.onmessage = function(e) {
                 }
             }
 
+            // The cinematic fades the aircraft in by overriding blending state on its
+            // materials. Snapshot what each one was authored with first, so the fade can
+            // be undone exactly - the canopy is a transparent material at opacity 0.4,
+            // and restoring a blanket 1.0 was turning the glass into painted metal.
             me.mesh.children.forEach(c => {
                 if (c !== introWireframeMesh && c !== me.muzzleFlash) {
                     c.traverse(child => {
                         if (child.isMesh) {
-                            child.material.transparent = true;
-                            child.material.opacity = 0;
-                            child.material.depthWrite = false; 
+                            const m = child.material;
+                            if (!m.userData.introBase) {
+                                m.userData.introBase = {
+                                    opacity: m.opacity,
+                                    transparent: m.transparent,
+                                    depthWrite: m.depthWrite
+                                };
+                            }
+                            m.transparent = true;
+                            m.opacity = 0;
+                            m.depthWrite = false;
                         }
                     });
                 }
@@ -6001,6 +6588,175 @@ self.onmessage = function(e) {
             r.toneMapping = THREE.ACESFilmicToneMapping;
             r.toneMappingExposure = 1.3;
             return r;
+        }
+
+        // ---------------------------------------------------------------------
+        // Selective bloom.
+        //
+        // A full EffectComposer would route the whole scene through a float target
+        // and threshold it, which on this map means the sky and the snow line bloom
+        // too, and costs a full-resolution copy every frame. Instead the emitters
+        // are tagged onto BLOOM_LAYER and drawn alone into a quarter-resolution
+        // target, blurred separably, and added straight over the finished frame.
+        // Nothing else is re-rendered and the main render path is untouched.
+        //
+        // The trade-off of layer-based extraction is that the glow is not occluded
+        // by geometry - an explosion directly behind a ridge still bleeds a little.
+        // At quarter res with this blur radius it reads as haze, and it buys us an
+        // extra pass that costs a few dozen instanced quads instead of a second
+        // pass over 15,000 trees and 350^2 terrain segments.
+        // ---------------------------------------------------------------------
+        const BLOOM_RESOLUTION_DIVISOR = 4;
+        let bloomRT = null;
+        let bloomBlurRT = null;
+        let bloomBlurMaterial = null;
+        let bloomCompositeMaterial = null;
+        let _bloomQuadScene = null;
+        let _bloomQuadCamera = null;
+        let _bloomQuad = null;
+        const _bloomClearColor = new THREE.Color(0x000000);
+        const _bloomPrevClearColor = new THREE.Color();
+
+        function initBloom() {
+            const size = new THREE.Vector2();
+            renderer.getDrawingBufferSize(size);
+            const w = Math.max(1, Math.floor(size.x / BLOOM_RESOLUTION_DIVISOR));
+            const h = Math.max(1, Math.floor(size.y / BLOOM_RESOLUTION_DIVISOR));
+
+            const rtOpts = {
+                minFilter: THREE.LinearFilter,
+                magFilter: THREE.LinearFilter,
+                format: THREE.RGBAFormat,
+                depthBuffer: false,
+                stencilBuffer: false
+            };
+            bloomRT = new THREE.WebGLRenderTarget(w, h, rtOpts);
+            bloomBlurRT = new THREE.WebGLRenderTarget(w, h, rtOpts);
+
+            // Nine-tap Gaussian folded into five bilinear fetches. Run once
+            // horizontally and once vertically, so the kernel is 9x9 for the cost of
+            // ten samples per pixel at a sixteenth of the pixel count.
+            bloomBlurMaterial = new THREE.ShaderMaterial({
+                uniforms: {
+                    tDiffuse: { value: null },
+                    direction: { value: new THREE.Vector2(1, 0) }
+                },
+                vertexShader: `
+                    varying vec2 vUv;
+                    void main() {
+                        vUv = uv;
+                        gl_Position = vec4(position.xy, 0.0, 1.0);
+                    }
+                `,
+                fragmentShader: `
+                    uniform sampler2D tDiffuse;
+                    uniform vec2 direction;
+                    varying vec2 vUv;
+                    void main() {
+                        vec3 sum = texture2D(tDiffuse, vUv).rgb * 0.2270270270;
+                        vec2 o1 = direction * 1.3846153846;
+                        vec2 o2 = direction * 3.2307692308;
+                        sum += texture2D(tDiffuse, vUv + o1).rgb * 0.3162162162;
+                        sum += texture2D(tDiffuse, vUv - o1).rgb * 0.3162162162;
+                        sum += texture2D(tDiffuse, vUv + o2).rgb * 0.0702702703;
+                        sum += texture2D(tDiffuse, vUv - o2).rgb * 0.0702702703;
+                        gl_FragColor = vec4(sum, 1.0);
+                    }
+                `,
+                depthTest: false,
+                depthWrite: false
+            });
+
+            bloomCompositeMaterial = new THREE.ShaderMaterial({
+                uniforms: {
+                    tDiffuse: { value: bloomRT.texture },
+                    strength: { value: 0.85 }
+                },
+                vertexShader: `
+                    varying vec2 vUv;
+                    void main() {
+                        vUv = uv;
+                        gl_Position = vec4(position.xy, 0.0, 1.0);
+                    }
+                `,
+                fragmentShader: `
+                    uniform sampler2D tDiffuse;
+                    uniform float strength;
+                    varying vec2 vUv;
+                    void main() {
+                        gl_FragColor = vec4(texture2D(tDiffuse, vUv).rgb * strength, 1.0);
+                    }
+                `,
+                blending: THREE.AdditiveBlending,
+                transparent: true,
+                depthTest: false,
+                depthWrite: false
+            });
+
+            _bloomQuadCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+            _bloomQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), bloomBlurMaterial);
+            _bloomQuad.frustumCulled = false;
+            _bloomQuadScene = new THREE.Scene();
+            _bloomQuadScene.add(_bloomQuad);
+        }
+
+        function resizeBloom() {
+            if (!bloomRT) return;
+            const size = new THREE.Vector2();
+            renderer.getDrawingBufferSize(size);
+            const w = Math.max(1, Math.floor(size.x / BLOOM_RESOLUTION_DIVISOR));
+            const h = Math.max(1, Math.floor(size.y / BLOOM_RESOLUTION_DIVISOR));
+            bloomRT.setSize(w, h);
+            bloomBlurRT.setSize(w, h);
+        }
+
+        // Called immediately after the main render, with the default framebuffer
+        // still holding this frame's image.
+        function renderBloom(camera) {
+            if (!bloomRT) return;
+
+            const prevMask = camera.layers.mask;
+            const prevBackground = scene.background;
+            const prevAutoClear = renderer.autoClear;
+            renderer.getClearColor(_bloomPrevClearColor);
+            const prevClearAlpha = renderer.getClearAlpha();
+
+            // scene.fog is deliberately left alone: nulling it flips USE_FOG on every
+            // material in the scene and forces a full shader recompile each frame.
+            // The emitter materials opt out of fog individually instead.
+            scene.background = null;
+            camera.layers.set(BLOOM_LAYER);
+            renderer.setClearColor(_bloomClearColor, 0);
+            renderer.setRenderTarget(bloomRT);
+            renderer.clear(true, false, false);
+            renderer.render(scene, camera);
+
+            camera.layers.mask = prevMask;
+            scene.background = prevBackground;
+
+            const texel = bloomBlurMaterial.uniforms.direction.value;
+            _bloomQuad.material = bloomBlurMaterial;
+            renderer.autoClear = true;
+
+            bloomBlurMaterial.uniforms.tDiffuse.value = bloomRT.texture;
+            texel.set(1.0 / bloomRT.width, 0);
+            renderer.setRenderTarget(bloomBlurRT);
+            renderer.render(_bloomQuadScene, _bloomQuadCamera);
+
+            bloomBlurMaterial.uniforms.tDiffuse.value = bloomBlurRT.texture;
+            texel.set(0, 1.0 / bloomRT.height);
+            renderer.setRenderTarget(bloomRT);
+            renderer.render(_bloomQuadScene, _bloomQuadCamera);
+
+            // Add over the frame that is already in the back buffer.
+            renderer.setRenderTarget(null);
+            renderer.autoClear = false;
+            _bloomQuad.material = bloomCompositeMaterial;
+            renderer.render(_bloomQuadScene, _bloomQuadCamera);
+
+            _bloomQuad.material = bloomBlurMaterial;
+            renderer.autoClear = prevAutoClear;
+            renderer.setClearColor(_bloomPrevClearColor, prevClearAlpha);
         }
 
         function handleKey(e, state) {
@@ -6192,6 +6948,22 @@ self.onmessage = function(e) {
 
         let _nextListenerUpdate = 0;
 
+        // Wingspan is roughly 16 units and the fuselage 18 long, so this fires a little
+        // before two models visibly overlap - close enough to read as a clip, loose
+        // enough that the 75ms interpolation delay on remote planes cannot make the two
+        // clients disagree about whether contact happened.
+        const PLANE_COLLISION_RADIUS_SQ = 15 * 15;
+        const _collisionDeaths = [];
+
+        function isFlying(p) {
+            if (p.isCrashed || p.disconnected) return false;
+            return p.isLocal ? !introCinematicActive : p.isSpawned;
+        }
+
+        function isSimulatedLocally(p) {
+            return p.isLocal || (isHost && p.isAI);
+        }
+
         function animate() {
             requestAnimationFrame(animate);
             if (!gameActive) return;
@@ -6235,6 +7007,33 @@ self.onmessage = function(e) {
                 }
                 
                 p.updateVisuals(timeScale);
+            }
+
+            // Mid-air collisions. Both aircraft are destroyed, and neither pilot is
+            // credited with a kill. Each client resolves this only for the planes it
+            // simulates - its own, plus the AI if it is the host - and the other party
+            // runs the identical test against the same two positions, so both go down
+            // without needing a new message type. Pairs are collected before anything
+            // dies so that a host owning both halves of a collision still kills each
+            // of them; killing in place would make the first death hide the second's
+            // collision partner.
+            _collisionDeaths.length = 0;
+            for (let i = 0; i < players.length; i++) {
+                const a = players[i];
+                if (!isFlying(a)) continue;
+                for (let j = i + 1; j < players.length; j++) {
+                    const b = players[j];
+                    if (!isFlying(b)) continue;
+                    if (a.mesh.position.distanceToSquared(b.mesh.position) >= PLANE_COLLISION_RADIUS_SQ) continue;
+
+                    if (isSimulatedLocally(a) && _collisionDeaths.indexOf(a) === -1) _collisionDeaths.push(a);
+                    if (isSimulatedLocally(b) && _collisionDeaths.indexOf(b) === -1) _collisionDeaths.push(b);
+                }
+            }
+            for (let i = 0; i < _collisionDeaths.length; i++) {
+                const p = _collisionDeaths[i];
+                p.diedByCollision = true;
+                p.die(-1);
             }
 
             for (let i = 0; i < projectilePool.length; i++) {
@@ -6321,16 +7120,18 @@ self.onmessage = function(e) {
                         me.camera.updateProjectionMatrix();
                         
                         me.mesh.children.forEach(c => {
-    // Prevent the muzzle flash from being forced to 1.0 opacity
-    if (c !== introWireframeMesh && c !== me.muzzleFlash) {
-        c.traverse(child => {
-            if (child.isMesh && child.material) {
-                child.material.opacity = 1.0;
-                child.material.depthWrite = true;
-            }
-        });
-    }
-});
+                            // Prevent the muzzle flash from being forced to 1.0 opacity
+                            if (c !== introWireframeMesh && c !== me.muzzleFlash) {
+                                c.traverse(child => {
+                                    if (child.isMesh && child.material) {
+                                        const base = child.material.userData.introBase;
+                                        child.material.opacity = base ? base.opacity : 1.0;
+                                        child.material.transparent = base ? base.transparent : false;
+                                        child.material.depthWrite = base ? base.depthWrite : true;
+                                    }
+                                });
+                            }
+                        });
                     }
                     
                     const moveProgress = Math.min(Math.max(progress / 0.6, 0.0), 1.0);
@@ -6350,7 +7151,10 @@ self.onmessage = function(e) {
                         if (c !== introWireframeMesh && c !== me.muzzleFlash) {
                             c.traverse(child => {
                                 if (child.isMesh && child.material) {
-                                    child.material.opacity = fadeProgress;
+                                    // Scaled by the authored opacity so the canopy fades
+                                    // in towards its own 0.4, not towards fully opaque.
+                                    const base = child.material.userData.introBase;
+                                    child.material.opacity = fadeProgress * (base ? base.opacity : 1.0);
                                 }
                             });
                         }
@@ -6478,6 +7282,7 @@ self.onmessage = function(e) {
                 if (csm) csm.update();
 
                 renderer.render(scene, me.camera);
+                renderBloom(me.camera);
             }
         }
 
@@ -6486,6 +7291,7 @@ self.onmessage = function(e) {
             const height = window.innerHeight;
             
             if (renderer) renderer.setSize(width, height);
+            resizeBloom();
 
             resizeUI3D();
 
