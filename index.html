@@ -5836,65 +5836,107 @@ self.onmessage = function(e) {
     }
 
     // Shore map. The water surface is only 100 segments across 14km, so a river is
-    // one or two vertices wide and anything driven off a per-vertex depth snaps to
-    // that grid. This captures the bed height while it is still a regular
-    // (segments+1)^2 lattice - before toNonIndexed() shreds it into a triangle soup -
-    // so the water shader can look up depth per fragment instead. It reuses heights
-    // that were just computed, so it costs no extra noise evaluation.
+    // one or two vertices wide, and anything driven off a per-vertex depth snaps to
+    // that grid. The shader instead samples this map per fragment.
     //
-    // Encoded as depth below the surface normalised over SHORE_RANGE. The terrain
-    // generator floors the bed at waterLevel - 60, so that range covers every depth
-    // that exists and gives ~0.24 units of precision in 8 bits.
+    // Bed heights are captured here, while they are still a regular (segments+1)^2
+    // lattice - before toNonIndexed() shreds the geometry into a triangle soup - so
+    // this reuses heights that were just computed and evaluates no extra noise.
+    //
+    // R = depth below the surface over SHORE_RANGE. The generator floors the bed at
+    // waterLevel - 60, so that range covers every depth that exists.
+    // G = distance out from the waterline over SHORE_DIST_RANGE, which is what the
+    // foam band is measured in. RGBA rather than a packed two-channel format so the
+    // rows stay 4-byte aligned on upload.
     const SHORE_RANGE = 60;
     const SHORE_DIST_RANGE = 320;
-    const shoreDim = CONFIG.segments + 1;
-    const shoreCell = CONFIG.width / CONFIG.segments;
+    const SHORE_TEX = 1024;
+    const srcDim = CONFIG.segments + 1;
 
-    const bedDepth = new Float32Array(shoreDim * shoreDim);
-    for (let i = 0; i < gPos.count; i++) {
-        bedDepth[i] = CONFIG.waterLevel - gPos.getY(i);
-    }
+    const srcHeight = new Float32Array(srcDim * srcDim);
+    for (let i = 0; i < gPos.count; i++) srcHeight[i] = gPos.getY(i);
 
-    // Distance to the nearest land cell, by two-pass chamfer transform. Depth alone
-    // is not a usable stand-in for this: it makes the width of the foam band depend
-    // on how steeply the bed shelves, so a beach gets metres of wash while a canyon
-    // river with near-vertical banks gets a band a couple of units wide and reads as
-    // having no shoreline at all. A real distance field gives the same band width
-    // everywhere regardless of bank angle.
-    const shoreDist = new Float32Array(shoreDim * shoreDim);
-    for (let i = 0; i < shoreDist.length; i++) {
-        shoreDist[i] = bedDepth[i] > 0 ? 1e9 : 0;
-    }
-    const D1 = 1.0, D2 = Math.SQRT2;
-    for (let y = 0; y < shoreDim; y++) {
-        for (let x = 0; x < shoreDim; x++) {
-            const i = y * shoreDim + x;
-            let d = shoreDist[i];
-            if (x > 0) d = Math.min(d, shoreDist[i - 1] + D1);
-            if (y > 0) d = Math.min(d, shoreDist[i - shoreDim] + D1);
-            if (x > 0 && y > 0) d = Math.min(d, shoreDist[i - shoreDim - 1] + D2);
-            if (x < shoreDim - 1 && y > 0) d = Math.min(d, shoreDist[i - shoreDim + 1] + D2);
-            shoreDist[i] = d;
-        }
-    }
-    for (let y = shoreDim - 1; y >= 0; y--) {
-        for (let x = shoreDim - 1; x >= 0; x--) {
-            const i = y * shoreDim + x;
-            let d = shoreDist[i];
-            if (x < shoreDim - 1) d = Math.min(d, shoreDist[i + 1] + D1);
-            if (y < shoreDim - 1) d = Math.min(d, shoreDist[i + shoreDim] + D1);
-            if (x < shoreDim - 1 && y < shoreDim - 1) d = Math.min(d, shoreDist[i + shoreDim + 1] + D2);
-            if (x > 0 && y < shoreDim - 1) d = Math.min(d, shoreDist[i + shoreDim - 1] + D2);
-            shoreDist[i] = d;
+    // Resampled up from the 40-unit terrain lattice to ~13.7 units. The foam band is
+    // a few dozen units wide, so at 40 units the lattice and the feature were the
+    // same size and every artefact in the field showed up as shape in the band.
+    // Bilinear upsampling adds no noise evaluations, and the vertex jitter it ignores
+    // is itself simplex-driven - a smooth, low-frequency offset rather than
+    // high-frequency error.
+    const shoreDepth = new Float32Array(SHORE_TEX * SHORE_TEX);
+    const srcStep = (srcDim - 1) / (SHORE_TEX - 1);
+    for (let y = 0; y < SHORE_TEX; y++) {
+        const gy = y * srcStep;
+        const y0 = Math.min(srcDim - 2, gy | 0);
+        const fy = gy - y0;
+        for (let x = 0; x < SHORE_TEX; x++) {
+            const gx = x * srcStep;
+            const x0 = Math.min(srcDim - 2, gx | 0);
+            const fx = gx - x0;
+            const i00 = y0 * srcDim + x0;
+            const top = srcHeight[i00] * (1 - fx) + srcHeight[i00 + 1] * fx;
+            const bot = srcHeight[i00 + srcDim] * (1 - fx) + srcHeight[i00 + srcDim + 1] * fx;
+            shoreDepth[y * SHORE_TEX + x] = CONFIG.waterLevel - (top * (1 - fy) + bot * fy);
         }
     }
 
-    // R = depth below the surface, G = distance to shore. RGBA rather than a packed
-    // two-channel format purely so the 351-wide rows stay 4-byte aligned on upload.
-    const shoreMap = new Uint8Array(shoreDim * shoreDim * 4);
-    for (let i = 0; i < shoreDim * shoreDim; i++) {
-        const dep = Math.max(0, Math.min(1, bedDepth[i] / SHORE_RANGE));
-        const dst = Math.max(0, Math.min(1, (shoreDist[i] * shoreCell) / SHORE_DIST_RANGE));
+    // Exact Euclidean distance transform (Felzenszwalb & Huttenlocher). The previous
+    // chamfer approximation stepped only orthogonally and diagonally, so its contours
+    // were octagons - which is what put angular white wedges on every headland and
+    // river bend. This computes true Euclidean distance, so an offset from the
+    // waterline is an actual offset curve.
+    const EDT_INF = 1e20;
+    const sqDist = new Float32Array(SHORE_TEX * SHORE_TEX);
+    for (let i = 0; i < sqDist.length; i++) {
+        sqDist[i] = shoreDepth[i] > 0 ? EDT_INF : 0;
+    }
+
+    const edtF = new Float32Array(SHORE_TEX);
+    const edtD = new Float32Array(SHORE_TEX);
+    const edtV = new Int32Array(SHORE_TEX);
+    const edtZ = new Float32Array(SHORE_TEX + 1);
+
+    function edt1d(n) {
+        let k = 0;
+        edtV[0] = 0;
+        edtZ[0] = -EDT_INF;
+        edtZ[1] = EDT_INF;
+        for (let q = 1; q < n; q++) {
+            let s = ((edtF[q] + q * q) - (edtF[edtV[k]] + edtV[k] * edtV[k])) / (2 * q - 2 * edtV[k]);
+            while (s <= edtZ[k]) {
+                k--;
+                s = ((edtF[q] + q * q) - (edtF[edtV[k]] + edtV[k] * edtV[k])) / (2 * q - 2 * edtV[k]);
+            }
+            k++;
+            edtV[k] = q;
+            edtZ[k] = s;
+            edtZ[k + 1] = EDT_INF;
+        }
+        k = 0;
+        for (let q = 0; q < n; q++) {
+            while (edtZ[k + 1] < q) k++;
+            const dq = q - edtV[k];
+            edtD[q] = dq * dq + edtF[edtV[k]];
+        }
+    }
+
+    for (let x = 0; x < SHORE_TEX; x++) {
+        for (let y = 0; y < SHORE_TEX; y++) edtF[y] = sqDist[y * SHORE_TEX + x];
+        edt1d(SHORE_TEX);
+        for (let y = 0; y < SHORE_TEX; y++) sqDist[y * SHORE_TEX + x] = edtD[y];
+    }
+    for (let y = 0; y < SHORE_TEX; y++) {
+        const row = y * SHORE_TEX;
+        for (let x = 0; x < SHORE_TEX; x++) edtF[x] = sqDist[row + x];
+        edt1d(SHORE_TEX);
+        for (let x = 0; x < SHORE_TEX; x++) sqDist[row + x] = edtD[x];
+    }
+
+    const shoreCell = CONFIG.width / (SHORE_TEX - 1);
+    const shoreDim = SHORE_TEX;
+    const shoreMap = new Uint8Array(SHORE_TEX * SHORE_TEX * 4);
+    for (let i = 0; i < SHORE_TEX * SHORE_TEX; i++) {
+        const dep = Math.max(0, Math.min(1, shoreDepth[i] / SHORE_RANGE));
+        const dst = Math.max(0, Math.min(1, (Math.sqrt(sqDist[i]) * shoreCell) / SHORE_DIST_RANGE));
         shoreMap[i * 4] = dep * 255;
         shoreMap[i * 4 + 1] = dst * 255;
         shoreMap[i * 4 + 3] = 255;
@@ -6257,23 +6299,34 @@ self.onmessage = function(e) {
                                     // depth. Driving it from depth meant its frequency
                                     // followed the bed gradient, so anywhere the bottom
                                     // shelved steeply it aliased into hard bands.
-                                    float ripple = 0.5 * sin(vSurfXZ.x * 0.055 + time * 2.2)
-                                                 + 0.5 * cos(vSurfXZ.y * 0.048 - time * 1.7);
+                                    //
+                                    // Three octaves rather than one: the long wave sets
+                                    // where the wash reaches, the shorter two give the
+                                    // edge a ragged, dissolving quality. With a single
+                                    // low-frequency term the band was a smooth ribbon
+                                    // whose outline was pure distance-field contour.
+                                    float ripple = 0.50 * sin(vSurfXZ.x * 0.055 + time * 2.2)
+                                                 + 0.50 * cos(vSurfXZ.y * 0.048 - time * 1.7)
+                                                 + 0.28 * sin((vSurfXZ.x + vSurfXZ.y) * 0.150 - time * 3.1)
+                                                 + 0.16 * cos((vSurfXZ.x - vSurfXZ.y) * 0.310 + time * 4.3);
 
                                     // Rather than modulating the foam's brightness, the
-                                    // ripple pushes the waterline itself in and out. That
-                                    // is what makes the edge read as a moving wash rather
-                                    // than a contour line with a pattern painted on it.
-                                    // Measured in world units out from the waterline, so
-                                    // the band is the same width on a beach and on a
-                                    // canyon bank.
-                                    float edge = 52.0 + ripple * 20.0 + vWaveHeight * 6.0;
+                                    // ripple pushes the waterline itself in and out, so the
+                                    // edge reads as a moving wash rather than a contour with
+                                    // a pattern painted on it. Measured in world units out
+                                    // from the waterline, so the band is the same width on a
+                                    // beach and on a canyon bank.
+                                    float edge = 60.0 + ripple * 15.0 + vWaveHeight * 5.0;
+
+                                    // Squared falloff: dense right at the waterline, thinning
+                                    // quickly on the way out, instead of a slab of even white.
                                     float foam = smoothstep(edge, 0.0, shoreDist);
-                                    gl_FragColor.rgb += vec3(foam * 0.42);
+                                    foam *= foam;
+                                    gl_FragColor.rgb += vec3(foam * 0.38);
 
                                     // Foam and grazing reflections both read as more solid
                                     // water, so they pull the surface towards opaque.
-                                    gl_FragColor.a = clamp(gl_FragColor.a + fresnel * 0.22 + foam * 0.5, 0.0, 1.0);
+                                    gl_FragColor.a = clamp(gl_FragColor.a + fresnel * 0.22 + foam * 0.35, 0.0, 1.0);
                                 }
                                 #include <tonemapping_fragment>
                                 `
