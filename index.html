@@ -1027,7 +1027,551 @@
         import * as THREE from 'three';
         import { SimplexNoise } from 'three/addons/math/SimplexNoise.js';
         import * as BufferGeometryUtils from 'three/addons/utils/BufferGeometryUtils.js';
-        import { CSM } from 'three/addons/csm/CSM.js';
+        // ---- SUN SHADOWS ----
+        // Replaces three's CSM addon, which produced a hard shadow/no-shadow edge that
+        // swung across the terrain whenever the plane rolled or pitched. Three failures
+        // in that addon combined to make it:
+        //
+        //   1. Each cascade's light is parked at `bbox.max.z + lightMargin` in light
+        //      space with a FIXED shadow-camera depth range (lightNear..lightFar). The
+        //      outermost cascade of a 60-degree/14000-unit frustum is ~33000 units deep
+        //      along the sun axis, so a 25000-unit range cut it off partway. Everything
+        //      past the cut has shadowCoord.z > 1, which three's getShadow() reports as
+        //      fully lit - a hard line, oriented perpendicular to the SUN rather than to
+        //      the camera, which is why it read as a line running out ahead of the plane
+        //      with shadow on one side and none on the other.
+        //   2. The clipped region is derived from the axis-aligned bounds of the ROTATED
+        //      camera frustum in light space, so the line jumps as soon as the camera
+        //      turns. Hence "moves drastically when I roll or pitch".
+        //   3. Casters more than lightMargin above the fitted box are never rasterised
+        //      into the map at all, so a plane climbing away from the terrain silently
+        //      drops its own shadow.
+        //
+        // The system below is built so none of those can happen:
+        //
+        //   * Cascades are NESTED - cascade i is fitted to the whole frustum from the
+        //     near plane out to split i, not to the slab between split i-1 and i. The
+        //     shader then picks a cascade by RADIAL distance, and radius >= planar depth,
+        //     so a fragment assigned to cascade i is always inside the region cascade i
+        //     was fitted to. There is no orientation for which selection and coverage can
+        //     disagree, which is the actual invariant the old code lacked.
+        //   * Each cascade is fitted to the BOUNDING SPHERE of its frustum. A sphere's
+        //     radius depends only on fov/aspect/near/far, never on where the camera is
+        //     pointing, so the ortho box is a fixed size and the fit cannot degrade with
+        //     roll or pitch. Its centre is snapped to the shadow map's texel grid so the
+        //     shadow edges do not crawl as the plane moves.
+        //   * The shadow camera's depth range is derived from that same radius plus a
+        //     caster headroom, every frame, per cascade. Nothing can fall outside it.
+        //   * Cascade transitions and the outer edge of the shadowed region are weighted
+        //     cross-fades, so the worst a boundary can ever look is a soft gradient. Any
+        //     weight no cascade claims stays lit, which is what dissolves the far edge.
+        const _stockLightsFragmentBegin = THREE.ShaderChunk.lights_fragment_begin;
+        const _stockLightsParsBegin = THREE.ShaderChunk.lights_pars_begin;
+
+        // The point/spot/rect-area/indirect sections are three 0.160's stock
+        // lights_fragment_begin verbatim; only the directional block is ours.
+        const SUN_SHADOW_FRAGMENT_BEGIN = /* glsl */`
+vec3 geometryPosition = - vViewPosition;
+vec3 geometryNormal = normal;
+vec3 geometryViewDir = ( isOrthographic ) ? vec3( 0, 0, 1 ) : normalize( vViewPosition );
+
+vec3 geometryClearcoatNormal = vec3( 0.0 );
+
+#ifdef USE_CLEARCOAT
+
+	geometryClearcoatNormal = clearcoatNormal;
+
+#endif
+
+#ifdef USE_IRIDESCENCE
+	float dotNVi = saturate( dot( normal, geometryViewDir ) );
+	if ( material.iridescenceThickness == 0.0 ) {
+		material.iridescence = 0.0;
+	} else {
+		material.iridescence = saturate( material.iridescence );
+	}
+	if ( material.iridescence > 0.0 ) {
+		material.iridescenceFresnel = evalIridescence( 1.0, material.iridescenceIOR, dotNVi, material.iridescenceThickness, material.specularColor );
+		material.iridescenceF0 = Schlick_to_F0( material.iridescenceFresnel, 1.0, dotNVi );
+	}
+#endif
+
+IncidentLight directLight;
+
+#if ( NUM_POINT_LIGHTS > 0 ) && defined( RE_Direct )
+
+	PointLight pointLight;
+	#if defined( USE_SHADOWMAP ) && NUM_POINT_LIGHT_SHADOWS > 0
+	PointLightShadow pointLightShadow;
+	#endif
+
+	#pragma unroll_loop_start
+	for ( int i = 0; i < NUM_POINT_LIGHTS; i ++ ) {
+
+		pointLight = pointLights[ i ];
+
+		getPointLightInfo( pointLight, geometryPosition, directLight );
+
+		#if defined( USE_SHADOWMAP ) && ( UNROLLED_LOOP_INDEX < NUM_POINT_LIGHT_SHADOWS )
+		pointLightShadow = pointLightShadows[ i ];
+		directLight.color *= ( directLight.visible && receiveShadow ) ? getPointShadow( pointShadowMap[ i ], pointLightShadow.shadowMapSize, pointLightShadow.shadowBias, pointLightShadow.shadowRadius, vPointShadowCoord[ i ], pointLightShadow.shadowCameraNear, pointLightShadow.shadowCameraFar ) : 1.0;
+		#endif
+
+		RE_Direct( directLight, geometryPosition, geometryNormal, geometryViewDir, geometryClearcoatNormal, material, reflectedLight );
+
+	}
+	#pragma unroll_loop_end
+
+#endif
+
+#if ( NUM_SPOT_LIGHTS > 0 ) && defined( RE_Direct )
+
+	SpotLight spotLight;
+	vec4 spotColor;
+	vec3 spotLightCoord;
+	bool inSpotLightMap;
+
+	#if defined( USE_SHADOWMAP ) && NUM_SPOT_LIGHT_SHADOWS > 0
+	SpotLightShadow spotLightShadow;
+	#endif
+
+	#pragma unroll_loop_start
+	for ( int i = 0; i < NUM_SPOT_LIGHTS; i ++ ) {
+
+		spotLight = spotLights[ i ];
+
+		getSpotLightInfo( spotLight, geometryPosition, directLight );
+
+		#if ( UNROLLED_LOOP_INDEX < NUM_SPOT_LIGHT_SHADOWS_WITH_MAPS )
+		#define SPOT_LIGHT_MAP_INDEX UNROLLED_LOOP_INDEX
+		#elif ( UNROLLED_LOOP_INDEX < NUM_SPOT_LIGHT_SHADOWS )
+		#define SPOT_LIGHT_MAP_INDEX NUM_SPOT_LIGHT_MAPS
+		#else
+		#define SPOT_LIGHT_MAP_INDEX ( UNROLLED_LOOP_INDEX - NUM_SPOT_LIGHT_SHADOWS + NUM_SPOT_LIGHT_SHADOWS_WITH_MAPS )
+		#endif
+		#if ( SPOT_LIGHT_MAP_INDEX < NUM_SPOT_LIGHT_MAPS )
+			spotLightCoord = vSpotLightCoord[ i ].xyz / vSpotLightCoord[ i ].w;
+			inSpotLightMap = all( lessThan( abs( spotLightCoord * 2. - 1. ), vec3( 1.0 ) ) );
+			spotColor = texture2D( spotLightMap[ SPOT_LIGHT_MAP_INDEX ], spotLightCoord.xy );
+			directLight.color = inSpotLightMap ? directLight.color * spotColor.rgb : directLight.color;
+		#endif
+		#undef SPOT_LIGHT_MAP_INDEX
+
+		#if defined( USE_SHADOWMAP ) && ( UNROLLED_LOOP_INDEX < NUM_SPOT_LIGHT_SHADOWS )
+		spotLightShadow = spotLightShadows[ i ];
+		directLight.color *= ( directLight.visible && receiveShadow ) ? getShadow( spotShadowMap[ i ], spotLightShadow.shadowMapSize, spotLightShadow.shadowBias, spotLightShadow.shadowRadius, vSpotLightCoord[ i ] ) : 1.0;
+		#endif
+
+		RE_Direct( directLight, geometryPosition, geometryNormal, geometryViewDir, geometryClearcoatNormal, material, reflectedLight );
+
+	}
+	#pragma unroll_loop_end
+
+#endif
+
+#if ( NUM_DIR_LIGHTS > 0 ) && defined( RE_Direct ) && defined( USE_CSM ) && defined( CSM_CASCADES )
+
+	// Every directional light in a USE_CSM material is a cascade of the same sun, so
+	// exactly one RE_Direct call is made and directionalLights[ 0 ] carries the colour.
+	DirectionalLight directionalLight;
+
+	#if defined( USE_SHADOWMAP ) && NUM_DIR_LIGHT_SHADOWS > 0
+
+		DirectionalLightShadow directionalLightShadow;
+
+		// Radial, not planar: csmSplits[ i ].y is the radius out to which cascade i was
+		// fitted, and length( vViewPosition ) is the fragment's radius. Because the
+		// cascades are nested, "radius < limit" is by itself proof the fragment is
+		// inside cascade i's shadow map, for any camera orientation.
+		float csmRadius = length( vViewPosition );
+
+		// csmRemain is the share of this fragment no nearer cascade has claimed yet, so
+		// the nearest (sharpest) cascade that covers the fragment always wins and the
+		// weights sum to exactly 1 without a second pass.
+		float csmRemain = 1.0;
+		float csmShadow = 0.0;
+
+		// Declared out here on purpose: three unrolls the loop below by pasting the body
+		// N times into this same scope, so anything declared inside would redeclare.
+		float csmAvail;
+		float csmWeight;
+
+		#pragma unroll_loop_start
+		for ( int i = 0; i < NUM_DIR_LIGHT_SHADOWS; i ++ ) {
+
+			csmAvail = 1.0 - smoothstep( csmSplits[ i ].x, csmSplits[ i ].y, csmRadius );
+			csmWeight = csmAvail * csmRemain;
+
+			if ( csmWeight > 0.0 ) {
+
+				directionalLightShadow = directionalLightShadows[ i ];
+				csmShadow += csmWeight * getShadow( directionalShadowMap[ i ], directionalLightShadow.shadowMapSize, directionalLightShadow.shadowBias, directionalLightShadow.shadowRadius, vDirectionalShadowCoord[ i ] );
+
+			}
+
+			csmRemain *= ( 1.0 - csmAvail );
+
+		}
+		#pragma unroll_loop_end
+
+		// Past the last cascade nothing is claimed, so csmRemain rises to 1 and the
+		// fragment ends up fully lit - the far edge of the shadowed region dissolves
+		// over the last cascade's fade band instead of ending on a line.
+		csmShadow += csmRemain;
+
+		directionalLight = directionalLights[ 0 ];
+		getDirectionalLightInfo( directionalLight, directLight );
+		directLight.color *= ( directLight.visible && receiveShadow ) ? csmShadow : 1.0;
+		RE_Direct( directLight, geometryPosition, geometryNormal, geometryViewDir, geometryClearcoatNormal, material, reflectedLight );
+
+	#else
+
+		directionalLight = directionalLights[ 0 ];
+		getDirectionalLightInfo( directionalLight, directLight );
+		RE_Direct( directLight, geometryPosition, geometryNormal, geometryViewDir, geometryClearcoatNormal, material, reflectedLight );
+
+	#endif
+
+#endif
+
+#if ( NUM_DIR_LIGHTS > 0 ) && defined( RE_Direct ) && !defined( USE_CSM ) && !defined( CSM_CASCADES )
+
+	DirectionalLight directionalLight;
+	#if defined( USE_SHADOWMAP ) && NUM_DIR_LIGHT_SHADOWS > 0
+	DirectionalLightShadow directionalLightShadow;
+	#endif
+
+	#pragma unroll_loop_start
+	for ( int i = 0; i < NUM_DIR_LIGHTS; i ++ ) {
+
+		directionalLight = directionalLights[ i ];
+
+		getDirectionalLightInfo( directionalLight, directLight );
+
+		#if defined( USE_SHADOWMAP ) && ( UNROLLED_LOOP_INDEX < NUM_DIR_LIGHT_SHADOWS )
+		directionalLightShadow = directionalLightShadows[ i ];
+		directLight.color *= ( directLight.visible && receiveShadow ) ? getShadow( directionalShadowMap[ i ], directionalLightShadow.shadowMapSize, directionalLightShadow.shadowBias, directionalLightShadow.shadowRadius, vDirectionalShadowCoord[ i ] ) : 1.0;
+		#endif
+
+		RE_Direct( directLight, geometryPosition, geometryNormal, geometryViewDir, geometryClearcoatNormal, material, reflectedLight );
+
+	}
+	#pragma unroll_loop_end
+
+#endif
+
+#if ( NUM_RECT_AREA_LIGHTS > 0 ) && defined( RE_Direct_RectArea )
+
+	RectAreaLight rectAreaLight;
+
+	#pragma unroll_loop_start
+	for ( int i = 0; i < NUM_RECT_AREA_LIGHTS; i ++ ) {
+
+		rectAreaLight = rectAreaLights[ i ];
+		RE_Direct_RectArea( rectAreaLight, geometryPosition, geometryNormal, geometryViewDir, geometryClearcoatNormal, material, reflectedLight );
+
+	}
+	#pragma unroll_loop_end
+
+#endif
+
+#if defined( RE_IndirectDiffuse )
+
+	vec3 iblIrradiance = vec3( 0.0 );
+
+	vec3 irradiance = getAmbientLightIrradiance( ambientLightColor );
+
+	#if defined( USE_LIGHT_PROBES )
+
+		irradiance += getLightProbeIrradiance( lightProbe, geometryNormal );
+
+	#endif
+
+	#if ( NUM_HEMI_LIGHTS > 0 )
+
+		#pragma unroll_loop_start
+		for ( int i = 0; i < NUM_HEMI_LIGHTS; i ++ ) {
+
+			irradiance += getHemisphereLightIrradiance( hemisphereLights[ i ], geometryNormal );
+
+		}
+		#pragma unroll_loop_end
+
+	#endif
+
+#endif
+
+#if defined( RE_IndirectSpecular )
+
+	vec3 radiance = vec3( 0.0 );
+	vec3 clearcoatRadiance = vec3( 0.0 );
+
+#endif
+`;
+
+        const SUN_SHADOW_PARS_BEGIN = /* glsl */`
+#if defined( USE_CSM ) && defined( CSM_CASCADES )
+uniform vec2 csmSplits[ CSM_CASCADES ];
+#endif
+` + _stockLightsParsBegin;
+
+        const _ssLightBasis = new THREE.Matrix4();
+        const _ssLightBasisInv = new THREE.Matrix4();
+        const _ssCenter = new THREE.Vector3();
+        const _ssForward = new THREE.Vector3();
+        const _ssCamPos = new THREE.Vector3();
+        const _ssOrigin = new THREE.Vector3();
+
+        class SunShadow {
+
+            constructor(data) {
+                this.camera = data.camera;
+                this.parent = data.parent;
+                this.cascades = data.cascades || 3;
+                this.maxFar = data.maxFar || 20000;
+                this.shadowMapSize = data.shadowMapSize || 1024;
+                this.lightDirection = new THREE.Vector3().copy(data.lightDirection).normalize();
+                this.lightIntensity = data.lightIntensity !== undefined ? data.lightIntensity : 3;
+                this.lightColor = data.lightColor !== undefined ? data.lightColor : new THREE.Color(0xffffff);
+
+                // How far above a cascade's sphere a caster can still be and be drawn
+                // into that cascade's map. This is the one number that decides whether a
+                // high-flying plane keeps its shadow on the ground, so it is sized to the
+                // whole playable altitude band rather than tuned by eye.
+                this.casterHeadroom = data.casterHeadroom !== undefined ? data.casterHeadroom : 8000;
+
+                // Width of the cross-fade at the outer edge of each cascade, as a
+                // fraction of that cascade's radius. Cascade i+1 must fully cover the
+                // band cascade i fades out over; validateSplits() below asserts that.
+                this.blendFraction = data.blendFraction !== undefined ? data.blendFraction : 0.12;
+
+                // Depth bias, in multiples of a cascade's world-space texel size. Bias
+                // has to scale with the cascade because the outer cascades have texels
+                // tens of units across; a single constant either acnes the near cascade
+                // or peter-pans the far one.
+                this.biasTexels = data.biasTexels !== undefined ? data.biasTexels : 1.5;
+                this.normalBiasTexels = data.normalBiasTexels !== undefined ? data.normalBiasTexels : 1.0;
+
+                // Per cascade: radial limit, sphere radius, distance from the camera to
+                // the sphere centre along the view axis, and the light's standoff.
+                this.limits = [];
+                this.radii = [];
+                this.centerDist = [];
+                this.standoff = [];
+
+                // Shared by every material's uniform block, so writing through it here
+                // updates all of them at once.
+                this.splitUniform = [];
+
+                this.lights = [];
+                this.shaders = new Map();
+
+                // Snapping has to happen on the same axes the shadow camera ends up
+                // using, and three builds those with Object3D.lookAt against the
+                // camera's `up`. Match it, and fall back to +Z if the sun is ever moved
+                // close enough to vertical that (0,1,0) degenerates.
+                this.up = Math.abs(this.lightDirection.y) > 0.999
+                    ? new THREE.Vector3(0, 0, 1)
+                    : new THREE.Vector3(0, 1, 0);
+
+                this.createLights();
+                this.updateFrustums();
+                this.injectInclude();
+            }
+
+            createLights() {
+                for (let i = 0; i < this.cascades; i++) {
+                    const light = new THREE.DirectionalLight(this.lightColor, this.lightIntensity);
+                    light.castShadow = true;
+                    light.shadow.mapSize.width = this.shadowMapSize;
+                    light.shadow.mapSize.height = this.shadowMapSize;
+                    light.shadow.camera.up.copy(this.up);
+                    light.up.copy(this.up);
+                    this.parent.add(light);
+                    this.parent.add(light.target);
+                    this.lights.push(light);
+                    this.splitUniform.push(new THREE.Vector2());
+                }
+            }
+
+            // Practical split scheme (half uniform, half logarithmic) over RADIAL
+            // distance. These are the limits the shader compares against, and the same
+            // numbers the spheres are fitted to, so the two can never drift apart.
+            computeSplits() {
+                const camera = this.camera;
+                const near = camera.near;
+                const far = Math.min(camera.far, this.maxFar);
+
+                this.limits.length = 0;
+                for (let i = 1; i <= this.cascades; i++) {
+                    const p = i / this.cascades;
+                    const uniform = near + (far - near) * p;
+                    const logarithmic = near * Math.pow(far / near, p);
+                    this.limits.push(THREE.MathUtils.lerp(uniform, logarithmic, 0.5));
+                }
+                this.limits[this.cascades - 1] = far;
+            }
+
+            // Bounding sphere of the frustum from the near plane out to `limit`. The
+            // frustum is the convex hull of its apex and its four far corners, and a
+            // sphere is convex, so a sphere through those five points contains all of
+            // it. Only fov, aspect and near enter the result - nothing about where the
+            // camera points - which is the property the old fit was missing.
+            updateShadowBounds() {
+                const camera = this.camera;
+                const near = camera.near;
+                const tanY = Math.tan(THREE.MathUtils.degToRad(camera.fov * 0.5));
+                const tanX = tanY * camera.aspect;
+                const kSq = tanX * tanX + tanY * tanY;
+
+                this.radii.length = 0;
+                this.centerDist.length = 0;
+                this.standoff.length = 0;
+
+                for (let i = 0; i < this.cascades; i++) {
+                    const limit = this.limits[i];
+
+                    // Solve |apex - c| == |farCorner - c| with c on the view axis.
+                    const centerDist = (limit * limit * (kSq + 1.0) - near * near) / (2.0 * (limit - near));
+                    const radius = centerDist - near;
+
+                    this.radii.push(radius);
+                    this.centerDist.push(centerDist);
+                    this.standoff.push(radius + this.casterHeadroom);
+
+                    const light = this.lights[i];
+                    const shadowCam = light.shadow.camera;
+                    shadowCam.left = -radius;
+                    shadowCam.right = radius;
+                    shadowCam.top = radius;
+                    shadowCam.bottom = -radius;
+
+                    // The light sits `standoff` back along the sun axis, so the far side
+                    // of the sphere is standoff + radius away. Anything between the sun
+                    // and the sphere is inside this range by construction, which is what
+                    // makes the clipped-shadow line impossible.
+                    shadowCam.near = 1;
+                    shadowCam.far = this.standoff[i] + radius;
+                    shadowCam.updateProjectionMatrix();
+
+                    const texelWorld = (2.0 * radius) / this.shadowMapSize;
+                    const depthRange = shadowCam.far - shadowCam.near;
+                    light.shadow.bias = -(this.biasTexels * texelWorld) / depthRange;
+                    light.shadow.normalBias = this.normalBiasTexels * texelWorld;
+
+                    this.splitUniform[i].set(limit * (1.0 - this.blendFraction), limit);
+                }
+            }
+
+            // Cascade i fades out over [limit_i * (1 - blend), limit_i]. Cascade i+1 has
+            // to be at full strength across that whole band or the cross-fade uncovers a
+            // gap, which would show up as exactly the kind of seam this rewrite exists to
+            // remove. Warn loudly rather than ship a silent one.
+            validateSplits() {
+                for (let i = 0; i < this.cascades - 1; i++) {
+                    const fadeStart = this.limits[i] * (1.0 - this.blendFraction);
+                    const nextFull = this.limits[i + 1] * (1.0 - this.blendFraction);
+                    if (fadeStart >= nextFull) {
+                        console.warn(
+                            `SunShadow: cascade ${i} fades out at ${fadeStart.toFixed(0)} but cascade ` +
+                            `${i + 1} is only at full strength below ${nextFull.toFixed(0)}. Lower ` +
+                            `blendFraction or add a cascade.`
+                        );
+                    }
+                }
+            }
+
+            update() {
+                const camera = this.camera;
+
+                _ssLightBasis.lookAt(_ssOrigin, this.lightDirection, this.up);
+                _ssLightBasisInv.copy(_ssLightBasis).transpose();
+
+                const e = camera.matrixWorld.elements;
+                _ssCamPos.set(e[12], e[13], e[14]);
+                _ssForward.set(-e[8], -e[9], -e[10]).normalize();
+
+                for (let i = 0; i < this.cascades; i++) {
+                    const light = this.lights[i];
+                    const radius = this.radii[i];
+                    const texel = (2.0 * radius) / this.shadowMapSize;
+
+                    _ssCenter.copy(_ssForward).multiplyScalar(this.centerDist[i]).add(_ssCamPos);
+
+                    // Quantise the centre on the shadow map's own axes. Without this the
+                    // sphere slides by sub-texel amounts every frame and every shadow
+                    // edge in the scene crawls.
+                    _ssCenter.applyMatrix4(_ssLightBasisInv);
+                    _ssCenter.x = Math.floor(_ssCenter.x / texel) * texel;
+                    _ssCenter.y = Math.floor(_ssCenter.y / texel) * texel;
+                    _ssCenter.applyMatrix4(_ssLightBasis);
+
+                    light.target.position.copy(_ssCenter);
+                    light.position.copy(this.lightDirection).multiplyScalar(-this.standoff[i]).add(_ssCenter);
+                }
+            }
+
+            injectInclude() {
+                THREE.ShaderChunk.lights_fragment_begin = SUN_SHADOW_FRAGMENT_BEGIN;
+                THREE.ShaderChunk.lights_pars_begin = SUN_SHADOW_PARS_BEGIN;
+            }
+
+            setupMaterial(material) {
+                material.defines = material.defines || {};
+                material.defines.USE_CSM = 1;
+                material.defines.CSM_CASCADES = this.cascades;
+
+                const shaders = this.shaders;
+                const splitUniform = this.splitUniform;
+
+                material.onBeforeCompile = function (shader) {
+                    shader.uniforms.csmSplits = { value: splitUniform };
+                    shaders.set(material, shader);
+                };
+
+                shaders.set(material, null);
+            }
+
+            // Every material shares the one splitUniform array by reference, so the
+            // values are already current; this only exists to re-point shaders compiled
+            // before a resize at that array.
+            updateUniforms() {
+                const splitUniform = this.splitUniform;
+                this.shaders.forEach(function (shader) {
+                    if (shader !== null) shader.uniforms.csmSplits.value = splitUniform;
+                });
+            }
+
+            updateFrustums() {
+                this.camera.updateProjectionMatrix();
+                this.computeSplits();
+                this.updateShadowBounds();
+                this.validateSplits();
+                this.updateUniforms();
+            }
+
+            remove() {
+                for (let i = 0; i < this.lights.length; i++) {
+                    this.parent.remove(this.lights[i].target);
+                    this.parent.remove(this.lights[i]);
+                }
+            }
+
+            dispose() {
+                this.shaders.forEach(function (shader, material) {
+                    delete material.onBeforeCompile;
+                    delete material.defines.USE_CSM;
+                    delete material.defines.CSM_CASCADES;
+                    if (shader !== null) delete shader.uniforms.csmSplits;
+                    material.needsUpdate = true;
+                });
+                this.shaders.clear();
+
+                THREE.ShaderChunk.lights_fragment_begin = _stockLightsFragmentBegin;
+                THREE.ShaderChunk.lights_pars_begin = _stockLightsParsBegin;
+            }
+
+        }
 
         // Helper to yield main thread and allow UI/CSS to unfreeze
         const yieldToBrowser = () => new Promise(resolve => setTimeout(resolve, 5));
@@ -1454,6 +1998,52 @@
         let treeGridDim = 0;
         const TREE_GRID_SIZE = 400;
 
+        // ---- SHARED MUZZLE FLASH LIGHT ----
+        // Each plane used to own a PointLight that stayed in the scene permanently
+        // (held at intensity 0) so the active-light count never changed and no shader
+        // recompile could stutter mid-fight. The cost of that is real: NUM_POINT_LIGHTS
+        // equals the player count, and every one of them runs a full BRDF evaluation
+        // on every shaded fragment of terrain, trees, water and planes - lit or not.
+        //
+        // One scene-level light replaces all of them. The count is pinned at 1 forever,
+        // so the recompile hazard is still gone, while the per-fragment cost stops
+        // scaling with the lobby size. The light has a 40-unit radius, so in practice
+        // it only ever illuminates the plane holding it. The local plane always wins
+        // the claim, because that is the one filling the screen.
+        let sharedMuzzleLight = null;
+        let sharedMuzzleLightOwner = null;
+
+        function claimMuzzleLight(player, intensity) {
+            player.muzzleFlashIntensity = intensity;
+            if (intensity > 0) {
+                const cur = sharedMuzzleLightOwner;
+                if (!cur || cur === player || cur.muzzleFlashIntensity <= 0 ||
+                    (player.isLocal && !cur.isLocal)) {
+                    sharedMuzzleLightOwner = player;
+                }
+            } else if (sharedMuzzleLightOwner === player) {
+                sharedMuzzleLightOwner = null;
+            }
+        }
+
+        function updateSharedMuzzleLight() {
+            if (!sharedMuzzleLight) return;
+            const owner = sharedMuzzleLightOwner;
+            // A per-plane light attached to a hidden plane contributed nothing, because
+            // the renderer skips invisible subtrees when it collects lights. Reproduce
+            // that here so a crashed or unspawned owner cannot leave the light burning.
+            if (!owner || owner.muzzleFlashIntensity <= 0 || owner.disconnected || !owner.mesh.visible) {
+                sharedMuzzleLight.intensity = 0;
+                return;
+            }
+            sharedMuzzleLight.intensity = owner.muzzleFlashIntensity;
+            owner.mesh.updateMatrixWorld();
+            // Matches the old light's place in the hierarchy: the muzzle flash mesh
+            // sits at (0, 0, -10.5) in plane space and the light sat at its origin.
+            _tempVec.set(0, 0, -10.5).applyMatrix4(owner.mesh.matrixWorld);
+            sharedMuzzleLight.position.copy(_tempVec);
+        }
+
         const maxSpeed = 2.2;
         const stallSpeed = 0.7;
         const acceleration = 0.01;
@@ -1677,39 +2267,292 @@
             return Math.max(CONFIG.waterLevel - 60, finalHeight);
         }
 
+        // The broadphase used to be an array-of-arrays of boxed indices. It is now a
+        // flat CSR layout (offsets + a single Int32Array of triangle bases), which
+        // removes ~500k boxed numbers and keeps each cell's triangle list in one
+        // contiguous cache line run. Cells are also much smaller, so a height query
+        // tests a handful of triangles instead of ~80. Every triangle is still
+        // inserted into every cell its bounding box touches, so the value returned
+        // by getVisualTerrainHeight is bit-for-bit what it was before.
         let terrainGrid = null;
-        const TERRAIN_CELL_SIZE = 200;
+        let terrainGridStart = null;
+        let terrainCellMaxY = null;
+        let terrainPositions = null;
+        const TERRAIN_CELL_SIZE = 50;
         let TERRAIN_GRID_DIM = 0;
 
         function buildTerrainGrid(positions) {
+            terrainPositions = positions;
             window.terrainPositions = positions;
             TERRAIN_GRID_DIM = Math.ceil(CONFIG.width / TERRAIN_CELL_SIZE);
-            terrainGrid = new Array(TERRAIN_GRID_DIM * TERRAIN_GRID_DIM);
-            for(let i = 0; i < terrainGrid.length; i++) terrainGrid[i] = [];
-            
+            const cellCount = TERRAIN_GRID_DIM * TERRAIN_GRID_DIM;
             const halfW = CONFIG.width / 2;
-            
+            const dim = TERRAIN_GRID_DIM;
+
+            const counts = new Int32Array(cellCount);
+            terrainCellMaxY = new Float32Array(cellCount);
+            terrainCellMaxY.fill(-Infinity);
+
+            // Pass 1: count references per cell and record the tallest vertex that
+            // overlaps each cell. That ceiling lets flight/projectile code skip the
+            // exact query entirely while it is clearly above the ground.
             for (let i = 0; i < positions.length; i += 9) {
                 const ax = positions[i], az = positions[i+2];
                 const bx = positions[i+3], bz = positions[i+5];
                 const cx = positions[i+6], cz = positions[i+8];
-                
+
                 const minX = Math.min(ax, bx, cx) + halfW;
                 const maxX = Math.max(ax, bx, cx) + halfW;
                 const minZ = Math.min(az, bz, cz) + halfW;
                 const maxZ = Math.max(az, bz, cz) + halfW;
-                
+
                 const startCol = Math.max(0, Math.floor(minX / TERRAIN_CELL_SIZE));
-                const endCol = Math.min(TERRAIN_GRID_DIM - 1, Math.floor(maxX / TERRAIN_CELL_SIZE));
+                const endCol = Math.min(dim - 1, Math.floor(maxX / TERRAIN_CELL_SIZE));
                 const startRow = Math.max(0, Math.floor(minZ / TERRAIN_CELL_SIZE));
-                const endRow = Math.min(TERRAIN_GRID_DIM - 1, Math.floor(maxZ / TERRAIN_CELL_SIZE));
-                
-                for (let c = startCol; c <= endCol; c++) {
-                    for (let r = startRow; r <= endRow; r++) {
-                        terrainGrid[r * TERRAIN_GRID_DIM + c].push(i);
+                const endRow = Math.min(dim - 1, Math.floor(maxZ / TERRAIN_CELL_SIZE));
+
+                const triMaxY = Math.max(positions[i+1], positions[i+4], positions[i+7]);
+
+                for (let r = startRow; r <= endRow; r++) {
+                    const rowBase = r * dim;
+                    for (let c = startCol; c <= endCol; c++) {
+                        const cell = rowBase + c;
+                        counts[cell]++;
+                        if (triMaxY > terrainCellMaxY[cell]) terrainCellMaxY[cell] = triMaxY;
                     }
                 }
             }
+
+            terrainGridStart = new Int32Array(cellCount + 1);
+            let total = 0;
+            for (let i = 0; i < cellCount; i++) {
+                terrainGridStart[i] = total;
+                total += counts[i];
+            }
+            terrainGridStart[cellCount] = total;
+
+            terrainGrid = new Int32Array(total);
+            const cursor = new Int32Array(cellCount);
+
+            // Pass 2: fill.
+            for (let i = 0; i < positions.length; i += 9) {
+                const ax = positions[i], az = positions[i+2];
+                const bx = positions[i+3], bz = positions[i+5];
+                const cx = positions[i+6], cz = positions[i+8];
+
+                const minX = Math.min(ax, bx, cx) + halfW;
+                const maxX = Math.max(ax, bx, cx) + halfW;
+                const minZ = Math.min(az, bz, cz) + halfW;
+                const maxZ = Math.max(az, bz, cz) + halfW;
+
+                const startCol = Math.max(0, Math.floor(minX / TERRAIN_CELL_SIZE));
+                const endCol = Math.min(dim - 1, Math.floor(maxX / TERRAIN_CELL_SIZE));
+                const startRow = Math.max(0, Math.floor(minZ / TERRAIN_CELL_SIZE));
+                const endRow = Math.min(dim - 1, Math.floor(maxZ / TERRAIN_CELL_SIZE));
+
+                for (let r = startRow; r <= endRow; r++) {
+                    const rowBase = r * dim;
+                    for (let c = startCol; c <= endCol; c++) {
+                        const cell = rowBase + c;
+                        terrainGrid[terrainGridStart[cell] + cursor[cell]] = i;
+                        cursor[cell]++;
+                    }
+                }
+            }
+        }
+
+        // Conservative upper bound on the ground height near (x, z). Returns
+        // Infinity where no baked triangle data exists, so callers fall back to the
+        // exact query rather than assuming clear air.
+        const TERRAIN_CEILING_MARGIN = 150;
+        function getTerrainCellCeiling(x, z) {
+            if (!terrainCellMaxY) return Infinity;
+            const halfW = CONFIG.width / 2;
+            const c = Math.floor((x + halfW) / TERRAIN_CELL_SIZE);
+            const r = Math.floor((z + halfW) / TERRAIN_CELL_SIZE);
+            if (c < 0 || c >= TERRAIN_GRID_DIM || r < 0 || r >= TERRAIN_GRID_DIM) return Infinity;
+            const maxY = terrainCellMaxY[r * TERRAIN_GRID_DIM + c];
+            return maxY === -Infinity ? Infinity : maxY + TERRAIN_CEILING_MARGIN;
+        }
+
+        const _bakeObj = new THREE.Object3D();
+
+        // Bakes a part's local transform into a copy of its geometry, so parts that
+        // share a material can be merged into a single draw call. A mirrored part has
+        // a negative-determinant matrix; the renderer normally compensates by flipping
+        // the front face for it at draw time, so once the transform is baked the
+        // triangle winding has to be reversed by hand to keep the same faces outward.
+        function bakePartGeometry(geo, px, py, pz, rx, ry, rz, sx, sy, sz) {
+            const g = geo.clone();
+            _bakeObj.position.set(px, py, pz);
+            _bakeObj.rotation.set(rx, ry, rz);
+            _bakeObj.scale.set(sx, sy, sz);
+            _bakeObj.updateMatrix();
+            g.applyMatrix4(_bakeObj.matrix);
+
+            if (_bakeObj.matrix.determinant() < 0) {
+                const idx = g.index;
+                if (idx) {
+                    const a = idx.array;
+                    for (let i = 0; i < a.length; i += 3) {
+                        const t = a[i + 1]; a[i + 1] = a[i + 2]; a[i + 2] = t;
+                    }
+                    idx.needsUpdate = true;
+                } else {
+                    for (const name in g.attributes) {
+                        const attr = g.attributes[name];
+                        const arr = attr.array, n = attr.itemSize;
+                        for (let i = 0; i < attr.count; i += 3) {
+                            for (let k = 0; k < n; k++) {
+                                const i1 = (i + 1) * n + k, i2 = (i + 2) * n + k;
+                                const t = arr[i1]; arr[i1] = arr[i2]; arr[i2] = t;
+                            }
+                        }
+                        attr.needsUpdate = true;
+                    }
+                }
+            }
+            return g;
+        }
+
+        // Local-space position of a point that used to be parented to a transformed
+        // part, for anchors whose parent geometry has been merged away.
+        function bakedAnchorPosition(target, lx, ly, lz, px, py, pz, rx, ry, rz, sx, sy, sz) {
+            _bakeObj.position.set(px, py, pz);
+            _bakeObj.rotation.set(rx, ry, rz);
+            _bakeObj.scale.set(sx, sy, sz);
+            _bakeObj.updateMatrix();
+            target.position.set(lx, ly, lz).applyMatrix4(_bakeObj.matrix);
+        }
+
+        // Static scenery never moves once generated, so its local matrix can be
+        // composed once instead of every frame by the renderer's scene walk.
+        function freezeTransform(obj) {
+            obj.traverse(o => {
+                o.updateMatrix();
+                o.matrixAutoUpdate = false;
+            });
+        }
+
+        // ---- WORLD CHUNKING ----
+        // The map is 14km across but the camera sees a wedge of it, and cascade 0
+        // of the sun shadows covers only a few thousand units. As one mesh, the terrain was
+        // submitted whole for the colour pass and again for each of the three
+        // cascades - a quarter of a million triangles, four times a frame, however
+        // little of it was on screen. Splitting it into a grid gives the frustum
+        // test something to reject.
+        //
+        // 8x8 is the balance point: 64 cells of 1750 units cull most of the world
+        // in a typical view while keeping the worst-case draw call count low enough
+        // that the per-call overhead stays well under what the culling saves.
+        // Props use the same grid so a rejected cell rejects its trees with it.
+        const WORLD_CHUNK_DIM = 8;
+
+        // Triangles are bucketed by centroid and their vertex data copied verbatim
+        // out of the worker's arrays - no regenerated normals and no reseaming, so
+        // the surface is identical to the single-mesh version. A triangle may
+        // overhang its cell by up to the jitter limit; the per-chunk bounding
+        // sphere is computed from the vertices actually in the chunk, so it covers
+        // that overhang on its own.
+        function buildChunkedTerrain(positions, normals, colors, material) {
+            const dim = WORLD_CHUNK_DIM;
+            const cellSize = CONFIG.width / dim;
+            const halfW = CONFIG.width / 2;
+            const cellTotal = dim * dim;
+            const triCount = (positions.length / 9) | 0;
+
+            const counts = new Uint32Array(cellTotal);
+            const cellOf = new Uint16Array(triCount);
+
+            for (let t = 0; t < triCount; t++) {
+                const i = t * 9;
+                const cx = (positions[i] + positions[i + 3] + positions[i + 6]) / 3;
+                const cz = (positions[i + 2] + positions[i + 5] + positions[i + 8]) / 3;
+                let gx = Math.floor((cx + halfW) / cellSize);
+                let gz = Math.floor((cz + halfW) / cellSize);
+                if (gx < 0) gx = 0; else if (gx >= dim) gx = dim - 1;
+                if (gz < 0) gz = 0; else if (gz >= dim) gz = dim - 1;
+                const cell = gz * dim + gx;
+                cellOf[t] = cell;
+                counts[cell]++;
+            }
+
+            const cellPos = new Array(cellTotal);
+            const cellNorm = new Array(cellTotal);
+            const cellCol = new Array(cellTotal);
+            for (let c = 0; c < cellTotal; c++) {
+                if (counts[c] === 0) continue;
+                cellPos[c] = new Float32Array(counts[c] * 9);
+                cellNorm[c] = new Float32Array(counts[c] * 9);
+                cellCol[c] = new Float32Array(counts[c] * 9);
+            }
+
+            const cursors = new Uint32Array(cellTotal);
+            for (let t = 0; t < triCount; t++) {
+                const c = cellOf[t];
+                const src = t * 9;
+                const dst = cursors[c];
+                cursors[c] = dst + 9;
+                const dp = cellPos[c], dn = cellNorm[c], dc = cellCol[c];
+                for (let k = 0; k < 9; k++) {
+                    dp[dst + k] = positions[src + k];
+                    dn[dst + k] = normals[src + k];
+                    dc[dst + k] = colors[src + k];
+                }
+            }
+
+            const meshes = [];
+            for (let c = 0; c < cellTotal; c++) {
+                if (counts[c] === 0) continue;
+                const geo = new THREE.BufferGeometry();
+                geo.setAttribute('position', new THREE.BufferAttribute(cellPos[c], 3));
+                geo.setAttribute('normal', new THREE.BufferAttribute(cellNorm[c], 3));
+                geo.setAttribute('color', new THREE.BufferAttribute(cellCol[c], 3));
+                geo.computeBoundingSphere();
+
+                const mesh = new THREE.Mesh(geo, material);
+                mesh.receiveShadow = true;
+                mesh.castShadow = true;
+                freezeTransform(mesh);
+                scene.add(mesh);
+                meshes.push(mesh);
+            }
+            return meshes;
+        }
+
+        // ---- POOLED OBJECT ATTACHMENT ----
+        // The projectile pool allocates its 250 rounds up front and used to keep all
+        // of them parented to the scene for the entire match. The renderer walks the
+        // scene graph once for the camera and once per shadow cascade, so every idle
+        // pooled object is visited four times a frame only to be found invisible.
+        //
+        // Pooled meshes now stay detached until they are actually in use. They are
+        // invisible while detached, so nothing about the rendered image changes.
+        // Attach/detach is O(1): three.js's own add/remove would do an indexOf over
+        // the child list, which is exactly the linear cost being removed here.
+        // (The particle pools solve the same problem by instancing instead - see
+        // ParticlePool.)
+        let pooledRoot = null;
+
+        function attachPooled(mesh) {
+            if (mesh.parent === pooledRoot) return;
+            const arr = pooledRoot.children;
+            mesh.parent = pooledRoot;
+            mesh.userData.childIdx = arr.length;
+            arr.push(mesh);
+        }
+
+        function detachPooled(mesh) {
+            if (mesh.parent !== pooledRoot) return;
+            const arr = pooledRoot.children;
+            const i = mesh.userData.childIdx;
+            if (i < 0 || arr[i] !== mesh) { mesh.parent = null; return; }
+            const last = arr[arr.length - 1];
+            arr[i] = last;
+            last.userData.childIdx = i;
+            arr.pop();
+            mesh.parent = null;
+            mesh.userData.childIdx = -1;
         }
 
         function getTriangleHeightAtXZ(px, pz, ax, ay, az, bx, by, bz, cx, cy, cz) {
@@ -1727,26 +2570,24 @@
         }
 
         function getVisualTerrainHeight(x, z) {
-            if (!terrainGrid || !window.terrainPositions) return getTerrainHeight(x, z);
-            // This function is called for every active projectile and plane. Keep the
-            // typed array lookup local rather than resolving the window property for
-            // every vertex of every candidate triangle.
-            const terrainPositions = window.terrainPositions;
-            
+            const pos = terrainPositions;
+            if (!terrainGrid || !pos) return getTerrainHeight(x, z);
+
             const halfW = CONFIG.width / 2;
             const c = Math.floor((x + halfW) / TERRAIN_CELL_SIZE);
             const r = Math.floor((z + halfW) / TERRAIN_CELL_SIZE);
-            
+
             if (c >= 0 && c < TERRAIN_GRID_DIM && r >= 0 && r < TERRAIN_GRID_DIM) {
-                const cell = terrainGrid[r * TERRAIN_GRID_DIM + c];
+                const cell = r * TERRAIN_GRID_DIM + c;
+                const end = terrainGridStart[cell + 1];
                 let highest = -9999;
                 let found = false;
-                for (let j = 0; j < cell.length; j++) {
-                    const idx = cell[j];
-                    const ax = terrainPositions[idx], ay = terrainPositions[idx+1], az = terrainPositions[idx+2];
-                    const bx = terrainPositions[idx+3], by = terrainPositions[idx+4], bz = terrainPositions[idx+5];
-                    const cx = terrainPositions[idx+6], cy = terrainPositions[idx+7], cz = terrainPositions[idx+8];
-                    
+                for (let j = terrainGridStart[cell]; j < end; j++) {
+                    const idx = terrainGrid[j];
+                    const ax = pos[idx], ay = pos[idx+1], az = pos[idx+2];
+                    const bx = pos[idx+3], by = pos[idx+4], bz = pos[idx+5];
+                    const cx = pos[idx+6], cy = pos[idx+7], cz = pos[idx+8];
+
                     const h = getTriangleHeightAtXZ(x, z, ax, ay, az, bx, by, bz, cx, cy, cz);
                     if (h !== null) {
                         if (h > highest) highest = h;
@@ -1831,27 +2672,6 @@
             leavesGeo.setAttribute('color', new THREE.Float32BufferAttribute(leavesColors, 3));
 
             return BufferGeometryUtils.mergeGeometries([trunkGeo, leavesGeo]);
-        }
-
-        function createGrassMesh() {
-            const geo1 = new THREE.PlaneGeometry(3, 4);
-            geo1.translate(0, 2, 0);
-            const geo2 = geo1.clone();
-            geo2.rotateY(Math.PI / 3);
-            const geo3 = geo1.clone();
-            geo3.rotateY(Math.PI * 2 / 3);
-
-            const grassGeo = BufferGeometryUtils.mergeGeometries([geo1, geo2, geo3]);
-            const colors = [];
-            for (let i = 0; i < grassGeo.attributes.position.count; i++) {
-                if (grassGeo.attributes.position.getY(i) < 1) {
-                    colors.push(0.2, 0.4, 0.1);
-                } else {
-                    colors.push(0.4, 0.7, 0.2);
-                }
-            }
-            grassGeo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
-            return grassGeo;
         }
 
         function createRockMesh() {
@@ -2239,6 +3059,8 @@
             warmRoute({ refDistance: 50, maxDistance: 5000, rolloffFactor: 1.0, reverb: false, oscillators: [], filters: ['lowpass'] });
         }
 
+        const ENGINE_PARAM_INTERVAL = 33;
+
         class EngineSound {
             constructor(isLocal) {
                 this.isLocal = isLocal;
@@ -2324,12 +3146,26 @@
                 this.whineGain.gain.value = 0;
                 this.windGain.gain.value = 0;
                 this.isStopped = false;
+                // Staggered so the planes do not all re-arm their automation on the
+                // same frame.
+                this._nextParamTime = performance.now() + Math.random() * ENGINE_PARAM_INTERVAL;
             }
 
             update(speed, throttle, pos) {
                 // A remote player can become spawned without a reset event. Restore
                 // its engine once here, rather than queuing repeated stop events.
                 if (this.isStopped) this.restart();
+
+                // Every parameter below is driven through setTargetAtTime with a 0.1s
+                // time constant, so the audible signal is a smoothed exponential
+                // approach rather than the raw per-frame value. Re-issuing that
+                // automation at ~30Hz instead of at frame rate leaves the rendered
+                // audio indistinguishable while cutting thousands of scheduled
+                // AudioParam events per second off the main thread.
+                const nowMs = performance.now();
+                if (nowMs < this._nextParamTime) return;
+                this._nextParamTime = nowMs + ENGINE_PARAM_INTERVAL;
+
                 const t = audioCtx.currentTime;
                 const dt = 0.1;
 
@@ -2374,6 +3210,9 @@
 
             restart() {
                 this.isStopped = false;
+                // Refresh the engine parameters on the very next update rather than
+                // waiting out the throttle interval.
+                this._nextParamTime = 0;
                 this.gain.gain.setTargetAtTime(1.0, audioCtx.currentTime, 0.1);
             }
         }
@@ -2990,28 +3829,97 @@
         }
 
         // --- PARTICLE POOLING SYSTEM ---
+        const _particleProjScreen = new THREE.Matrix4();
+        const _particleVec = new THREE.Vector3();
+        const _particleQuat = new THREE.Quaternion();
+        const _particleMatrix = new THREE.Matrix4();
+        // Farthest first, matching three.js's reversePainterSortStable for transparent
+        // objects, so overlapping particles blend in the order they always did.
+        const _particleDepthSort = (a, b) => b._z - a._z;
+
+        // A pooled particle used to be a THREE.Mesh carrying its own material. With
+        // ~500 of them alive during a fight that cost about 7ms per frame on an Iris
+        // Xe: each one is an object to walk, frustum-test and depth-sort, and a
+        // material switch plus a fresh uniform upload at draw time.
+        //
+        // They are now instances of one InstancedMesh per pool - two draw calls for
+        // the entire particle system. Colour rides on the standard instanceColor
+        // attribute and per-particle alpha on a custom one, so every particle keeps
+        // its own tint and fade curve. Everything the effect classes touch
+        // (position/rotation/scale/material.color/material.opacity/visible/userData)
+        // is still here, so their update code is unchanged.
+        class PooledParticle {
+            constructor() {
+                this.position = new THREE.Vector3();
+                this.rotation = new THREE.Euler();
+                this.scale = new THREE.Vector3(1, 1, 1);
+                this.material = { color: new THREE.Color(0xffffff), opacity: 1 };
+                this.visible = false;
+                this._z = 0;
+                this.userData = {
+                    velocity: new THREE.Vector3(),
+                    rotSpeed: 0,
+                    life: 0,
+                    baseOpacity: 1,
+                    isFlame: false,
+                    isWater: false,
+                    poolItem: null
+                };
+            }
+        }
+
         class ParticlePool {
             constructor(geometry, maxSize) {
                 this.items = [];
                 // A min-heap of inactive entries. The old linear scan always chose
                 // the lowest available slot, so keeping this order preserves which
-                // particle mesh is selected while making get() logarithmic.
+                // particle is selected while making get() logarithmic.
                 this.freeItems = [];
+                this.activeList = [];
+                this.maxSize = maxSize;
+                this._order = [];
+
+                this.material = new THREE.MeshBasicMaterial({ transparent: true });
+                this.material.customProgramCacheKey = () => 'instancedParticleAlpha';
+                this.material.onBeforeCompile = (shader) => {
+                    shader.vertexShader = 'attribute float instanceAlpha;\nvarying float vInstanceAlpha;\n' +
+                        shader.vertexShader.replace(
+                            '#include <begin_vertex>',
+                            '#include <begin_vertex>\n\tvInstanceAlpha = instanceAlpha;'
+                        );
+                    // The instance tint is handled by three.js itself: enabling
+                    // instanceColor makes it define USE_COLOR for the fragment stage,
+                    // so its own colour chunks multiply vColor into diffuseColor.
+                    // Only the per-instance alpha needs adding here.
+                    shader.fragmentShader = 'varying float vInstanceAlpha;\n' +
+                        shader.fragmentShader.replace(
+                            'vec4 diffuseColor = vec4( diffuse, opacity );',
+                            'vec4 diffuseColor = vec4( diffuse, opacity * vInstanceAlpha );'
+                        );
+                };
+
+                this.mesh = new THREE.InstancedMesh(geometry, this.material, maxSize);
+                this.mesh.count = 0;
+                // One bounding volume around thousands of scattered particles culls
+                // nothing useful; skip the test rather than risk a stale sphere.
+                this.mesh.frustumCulled = false;
+                this.mesh.matrixAutoUpdate = false;
+                this.mesh.updateMatrix();
+                // Drawn after the other transparent surfaces, which is the order that
+                // matters: particles are almost always in front of the water and the
+                // canopy glass, and need to blend over them.
+                this.mesh.renderOrder = 10;
+                this.mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(maxSize * 3), 3);
+                this.alphaAttr = new THREE.InstancedBufferAttribute(new Float32Array(maxSize), 1);
+                geometry.setAttribute('instanceAlpha', this.alphaAttr);
+
                 for (let i = 0; i < maxSize; i++) {
-                    const mat = new THREE.MeshBasicMaterial({ transparent: true });
-                    const mesh = new THREE.Mesh(geometry, mat);
-                    mesh.visible = false;
-                    mesh.userData.velocity = new THREE.Vector3();
-                    mesh.userData.rotSpeed = 0;
-                    mesh.userData.life = 0;
-                    mesh.userData.baseOpacity = 1;
-                    mesh.userData.isFlame = false;
-                    mesh.userData.isWater = false;
-                    const item = { mesh, active: false, poolIndex: i };
+                    const p = new PooledParticle();
+                    const item = { mesh: p, active: false, poolIndex: i, activeIdx: -1 };
                     // Pool releases occur in particle update loops. Retaining the
                     // owning item avoids a linear search through up to 3,000 entries
                     // for every released particle, while preserving allocation order.
-                    mesh.userData.poolItem = item;
+                    p.userData.poolItem = item;
                     this.items.push(item);
                     this.freeItems.push(item);
                 }
@@ -3036,6 +3944,8 @@
                     heap[i] = last;
                 }
                 item.active = true;
+                item.activeIdx = this.activeList.length;
+                this.activeList.push(item);
                 return item.mesh;
             }
             release(mesh) {
@@ -3044,6 +3954,15 @@
                 if (!item || !item.active) return;
 
                 item.active = false;
+
+                const al = this.activeList;
+                const ai = item.activeIdx;
+                const lastActive = al[al.length - 1];
+                al[ai] = lastActive;
+                lastActive.activeIdx = ai;
+                al.pop();
+                item.activeIdx = -1;
+
                 const heap = this.freeItems;
                 let i = heap.length;
                 heap.push(item);
@@ -3054,6 +3973,71 @@
                     i = parent;
                 }
                 heap[i] = item;
+            }
+            // Writes the live particles into the instance buffers, back to front.
+            commit(camera) {
+                const list = this.activeList;
+                const order = this._order;
+                order.length = 0;
+
+                if (list.length > 0) {
+                    _particleProjScreen.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+                    for (let i = 0; i < list.length; i++) {
+                        const p = list[i].mesh;
+                        if (!p.visible) continue;
+                        _particleVec.copy(p.position).applyMatrix4(_particleProjScreen);
+                        p._z = _particleVec.z;
+                        order.push(p);
+                    }
+                    order.sort(_particleDepthSort);
+                }
+
+                const count = order.length;
+                this.mesh.count = count;
+                if (count === 0) return;
+
+                const mArr = this.mesh.instanceMatrix.array;
+                const cArr = this.mesh.instanceColor.array;
+                const aArr = this.alphaAttr.array;
+
+                for (let i = 0; i < count; i++) {
+                    const p = order[i];
+                    _particleQuat.setFromEuler(p.rotation);
+                    _particleMatrix.compose(p.position, _particleQuat, p.scale);
+                    _particleMatrix.toArray(mArr, i * 16);
+                    const c = p.material.color;
+                    const c3 = i * 3;
+                    cArr[c3] = c.r; cArr[c3 + 1] = c.g; cArr[c3 + 2] = c.b;
+                    aArr[i] = p.material.opacity;
+                }
+
+                // Only the slots actually in use are re-uploaded.
+                this.mesh.instanceMatrix.needsUpdate = true;
+                this.mesh.instanceMatrix.updateRange.count = count * 16;
+                this.mesh.instanceColor.needsUpdate = true;
+                this.mesh.instanceColor.updateRange.count = count * 3;
+                this.alphaAttr.needsUpdate = true;
+                this.alphaAttr.updateRange.count = count;
+            }
+            // Puts a few instances on screen so the driver builds the real pipeline
+            // during the loading screen rather than on the first explosion.
+            primeWarmUp(position) {
+                const n = Math.min(4, this.maxSize);
+                const mArr = this.mesh.instanceMatrix.array;
+                const cArr = this.mesh.instanceColor.array;
+                for (let i = 0; i < n; i++) {
+                    _particleMatrix.makeTranslation(position.x, position.y, position.z);
+                    _particleMatrix.toArray(mArr, i * 16);
+                    cArr[i * 3] = 1; cArr[i * 3 + 1] = 1; cArr[i * 3 + 2] = 1;
+                    this.alphaAttr.array[i] = 0.01;
+                }
+                this.mesh.count = n;
+                this.mesh.instanceMatrix.needsUpdate = true;
+                this.mesh.instanceColor.needsUpdate = true;
+                this.alphaAttr.needsUpdate = true;
+            }
+            endWarmUp() {
+                this.mesh.count = 0;
             }
         }
         
@@ -3212,6 +4196,17 @@
                 this.isLocalOrHostAI = false;
                 this.mesh = new THREE.Mesh(_sharedProjGeo, _sharedProjMat);
                 this.mesh.visible = false;
+                // 250 pooled rounds live in the scene permanently; keep the renderer
+                // from walking and recomposing the idle ones. They are scene-level
+                // children, so world == local.
+                this.mesh.matrixAutoUpdate = false;
+                this.mesh.matrixWorldAutoUpdate = false;
+                this.mesh.userData.childIdx = -1;
+            }
+            deactivate() {
+                this.isActive = false;
+                this.mesh.visible = false;
+                detachPooled(this.mesh);
             }
             activate(ownerIdx, position, quaternion, speed, isLocalOrHostAI) {
                 this.ownerIdx = ownerIdx;
@@ -3220,25 +4215,45 @@
                 this.hitType = null;
                 this.mesh.position.copy(position);
                 this.mesh.quaternion.copy(quaternion);
+                this.mesh.updateMatrix();
+                this.mesh.matrixWorld.copy(this.mesh.matrix);
                 this.mesh.visible = true;
+                attachPooled(this.mesh);
                 this.isActive = true;
                 this.isLocalOrHostAI = isLocalOrHostAI;
             }
             update(timeScale) {
                 if (!this.isActive) return false;
                 this.mesh.translateZ(-this.speed * timeScale);
+                this.mesh.updateMatrix();
+                this.mesh.matrixWorld.copy(this.mesh.matrix);
                 this.life -= 1.0 * timeScale;
-                
-                const tH = getVisualTerrainHeight(this.mesh.position.x, this.mesh.position.z);
-                
-                if (this.mesh.position.y < CONFIG.waterLevel && tH <= CONFIG.waterLevel) {
+
+                const px = this.mesh.position.x;
+                const py = this.mesh.position.y;
+                const pz = this.mesh.position.z;
+
+                // While the round is above both the water plane and the tallest
+                // ground in its broadphase cell, neither collision branch below can
+                // fire, so the per-triangle height query is skipped outright.
+                if (py >= CONFIG.waterLevel && py >= getTerrainCellCeiling(px, pz)) {
+                    if (this.life <= 0) {
+                        this.hitType = 'timeout';
+                        return false;
+                    }
+                    return true;
+                }
+
+                const tH = getVisualTerrainHeight(px, pz);
+
+                if (py < CONFIG.waterLevel && tH <= CONFIG.waterLevel) {
                     this.hitType = 'water';
                     return false;
-                } else if (this.mesh.position.y < tH) {
+                } else if (py < tH) {
                     this.hitType = 'dirt';
                     return false;
                 }
-                
+
                 if (this.life <= 0) {
                     this.hitType = 'timeout';
                     return false;
@@ -3324,6 +4339,7 @@
                 this.radarBlip = document.createElement('div');
                 this.radarBlip.className = 'radar-blip';
                 this.radarBlipStyle = this.radarBlip.style;
+                this._blipVisible = null;
                 const radarColor = '#' + this.color.getHexString();
                 this.radarBlipStyle.backgroundColor = radarColor;
                 this.radarBlipStyle.boxShadow = `0 0 5px ${radarColor}`;
@@ -3335,6 +4351,7 @@
             dispose() {
                 this.disconnected = true;
                 this.mesh.visible = false;
+                claimMuzzleLight(this, 0);
                 if (this.radarBlip && this.radarBlip.parentNode) {
                     this.radarBlip.parentNode.removeChild(this.radarBlip);
                 }
@@ -3358,73 +4375,38 @@
                     color: 0x111111, metalness: 0.9, roughness: 0.05, transparent: true, opacity: 0.4, flatShading: true
                 });
 
+                // Every part below is the same shape, in the same place, with the same
+                // material as before. The only change is that parts sharing a material
+                // have their transform baked into the geometry and are merged into one
+                // mesh. A plane goes from 17 draw calls to 6 - and because planes cast
+                // shadows, each of those is submitted again for all three cascades.
                 const bodyGeo = new THREE.CylinderGeometry(1.1, 0.9, 7, 10);
                 bodyGeo.rotateX(Math.PI / 2);
-                const body = new THREE.Mesh(bodyGeo, bodyMat);
-                planeGroup.add(body);
 
                 const noseGeo = new THREE.CylinderGeometry(0.9, 0.8, 3.5, 10);
                 noseGeo.rotateX(Math.PI / 2);
                 noseGeo.translate(0, 0, -5.25);
-                const nose = new THREE.Mesh(noseGeo, bodyMat);
-                planeGroup.add(nose);
 
                 const spinnerGeo = new THREE.CylinderGeometry(0.8, 0.1, 2, 10);
                 spinnerGeo.rotateX(Math.PI / 2);
                 spinnerGeo.translate(0, 0, -8);
-                const spinner = new THREE.Mesh(spinnerGeo, highlightMat);
-                planeGroup.add(spinner);
 
                 const tailBoomGeo = new THREE.CylinderGeometry(0.4, 1.1, 6, 10);
                 tailBoomGeo.rotateX(Math.PI / 2);
                 tailBoomGeo.translate(0, 0, 6.5);
-                const tailBoom = new THREE.Mesh(tailBoomGeo, bodyMat);
-                planeGroup.add(tailBoom);
 
                 const cockpitGeo = new THREE.SphereGeometry(1.1, 8, 8);
                 cockpitGeo.scale(1, 0.8, 2.5);
                 cockpitGeo.translate(0, 0.8, -0.5);
-                const cockpit = new THREE.Mesh(cockpitGeo, glassMat);
-                planeGroup.add(cockpit);
 
-                const wingGroup = new THREE.Group();
                 const wGeo = new THREE.BoxGeometry(7, 0.2, 3);
                 wGeo.translate(3.5, 0, 0.5);
-                
-                const leftWing = new THREE.Mesh(wGeo, bodyMat);
-                leftWing.position.set(0.8, -0.2, -1);
-                leftWing.rotation.x = -0.05; leftWing.rotation.y = -0.2;
 
                 const wTipGeo = new THREE.BoxGeometry(0.5, 0.21, 3);
                 wTipGeo.translate(7.25, 0, 0.5);
-                const leftTip = new THREE.Mesh(wTipGeo, highlightMat);
-                leftTip.position.set(0.8, -0.2, -1);
-                leftTip.rotation.x = -0.05; leftTip.rotation.y = -0.2;
-
-                this.leftAnchor = new THREE.Object3D();
-                this.leftAnchor.position.set(7.5, 0, 0.5);
-                leftTip.add(this.leftAnchor);
-
-                const rightWing = new THREE.Mesh(wGeo, bodyMat);
-                rightWing.position.set(-0.8, -0.2, -1);
-                rightWing.rotation.x = -0.05; rightWing.rotation.y = 0.2; rightWing.scale.x = -1;
-
-                const rightTip = new THREE.Mesh(wTipGeo, highlightMat);
-                rightTip.position.set(-0.8, -0.2, -1);
-                rightTip.rotation.x = -0.05; rightTip.rotation.y = 0.2; rightTip.scale.x = -1;
-
-                this.rightAnchor = new THREE.Object3D();
-                this.rightAnchor.position.set(7.5, 0, 0.5);
-                rightTip.add(this.rightAnchor);
-
-                wingGroup.add(leftWing, rightWing, leftTip, rightTip);
-                planeGroup.add(wingGroup);
 
                 const hStabGeo = new THREE.BoxGeometry(5, 0.15, 2);
                 hStabGeo.translate(0, 0, 1);
-                const hStab = new THREE.Mesh(hStabGeo, bodyMat);
-                hStab.position.set(0, 0.28, 8.5);
-                planeGroup.add(hStab);
 
                 const vStabGeo = new THREE.BoxGeometry(0.2, 3, 2.5);
                 const pos = vStabGeo.attributes.position;
@@ -3433,26 +4415,51 @@
                 }
                 vStabGeo.computeVertexNormals();
 
-                const vStab = new THREE.Mesh(vStabGeo, highlightMat);
-                vStab.position.set(0, 2.0, 8.5);
-                planeGroup.add(vStab);
-
                 const scoopGeo = new THREE.BoxGeometry(1.2, 0.6, 3);
                 scoopGeo.translate(0, -0.3, 0);
-                const scoop = new THREE.Mesh(scoopGeo, bodyMat);
-                scoop.position.set(0, -0.9, 1);
-                planeGroup.add(scoop);
+
+                const bodyMesh = new THREE.Mesh(BufferGeometryUtils.mergeGeometries([
+                    bakePartGeometry(bodyGeo,     0, 0, 0,        0, 0, 0,      1, 1, 1),
+                    bakePartGeometry(noseGeo,     0, 0, 0,        0, 0, 0,      1, 1, 1),
+                    bakePartGeometry(tailBoomGeo, 0, 0, 0,        0, 0, 0,      1, 1, 1),
+                    bakePartGeometry(wGeo,        0.8, -0.2, -1,  -0.05, -0.2, 0,  1, 1, 1),
+                    bakePartGeometry(wGeo,       -0.8, -0.2, -1,  -0.05,  0.2, 0, -1, 1, 1),
+                    bakePartGeometry(hStabGeo,    0, 0.28, 8.5,   0, 0, 0,      1, 1, 1),
+                    bakePartGeometry(scoopGeo,    0, -0.9, 1,     0, 0, 0,      1, 1, 1)
+                ]), bodyMat);
+                planeGroup.add(bodyMesh);
+
+                const highlightMesh = new THREE.Mesh(BufferGeometryUtils.mergeGeometries([
+                    bakePartGeometry(spinnerGeo,  0, 0, 0,        0, 0, 0,      1, 1, 1),
+                    bakePartGeometry(wTipGeo,     0.8, -0.2, -1,  -0.05, -0.2, 0,  1, 1, 1),
+                    bakePartGeometry(wTipGeo,    -0.8, -0.2, -1,  -0.05,  0.2, 0, -1, 1, 1),
+                    bakePartGeometry(vStabGeo,    0, 2.0, 8.5,    0, 0, 0,      1, 1, 1)
+                ]), highlightMat);
+                planeGroup.add(highlightMesh);
+
+                const cockpit = new THREE.Mesh(cockpitGeo, glassMat);
+                planeGroup.add(cockpit);
+
+                // The wing tips these hang off are merged away, so the anchors carry
+                // the baked transform and sit directly on the plane instead.
+                this.leftAnchor = new THREE.Object3D();
+                bakedAnchorPosition(this.leftAnchor, 7.5, 0, 0.5, 0.8, -0.2, -1, -0.05, -0.2, 0, 1, 1, 1);
+                planeGroup.add(this.leftAnchor);
+
+                this.rightAnchor = new THREE.Object3D();
+                bakedAnchorPosition(this.rightAnchor, 7.5, 0, 0.5, -0.8, -0.2, -1, -0.05, 0.2, 0, -1, 1, 1);
+                planeGroup.add(this.rightAnchor);
 
                 this.propeller = new THREE.Group();
                 const bladeGeo = new THREE.BoxGeometry(0.18, 3.6, 0.2);
                 bladeGeo.translate(0, 1.8, 0);
                 const propMat = new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.5, flatShading: true });
 
+                const bladeGeos = [];
                 for (let i = 0; i < 3; i++) {
-                    const blade = new THREE.Mesh(bladeGeo, propMat);
-                    blade.rotation.z = (i / 3) * Math.PI * 2;
-                    this.propeller.add(blade);
+                    bladeGeos.push(bakePartGeometry(bladeGeo, 0, 0, 0, 0, 0, (i / 3) * Math.PI * 2, 1, 1, 1));
                 }
+                this.propeller.add(new THREE.Mesh(BufferGeometryUtils.mergeGeometries(bladeGeos), propMat));
 
                 const capGeo = new THREE.ConeGeometry(0.3, 0.5, 8);
                 capGeo.rotateX(Math.PI / 2);
@@ -3468,11 +4475,11 @@
                 const flashMat = new THREE.MeshBasicMaterial({ color: 0xffff00, transparent: true, opacity: 0.0, depthWrite: false });
                 this.muzzleFlash = new THREE.Mesh(flashGeo, flashMat);
                 this.muzzleFlash.position.set(0, 0, -10.5);
-                
-                this.muzzleFlashLight = new THREE.PointLight(0xffdd66, 0, 40);
-                this.muzzleFlash.add(this.muzzleFlashLight);
-                
-                this.muzzleFlash.visible = true; 
+
+                // The point light itself is shared scene-wide; see claimMuzzleLight().
+                this.muzzleFlashIntensity = 0;
+
+                this.muzzleFlash.visible = true;
                 planeGroup.add(this.muzzleFlash);
 
                 planeGroup.traverse(child => {
@@ -3669,7 +4676,7 @@
                 this.flashTimer = 0;
                 if (this.muzzleFlash) {
                     this.muzzleFlash.material.opacity = 0;
-                    this.muzzleFlashLight.intensity = 0;
+                    claimMuzzleLight(this, 0);
                 }
 
                 if (this.index === myPlayerIndex) document.getElementById('crash-msg').style.display = 'none';
@@ -3760,18 +4767,22 @@
                         this.flashTimer = 0.1;
                         if (this.muzzleFlash) {
                             this.muzzleFlash.material.opacity = 0.8;
-                            this.muzzleFlashLight.intensity = 150;
+                            claimMuzzleLight(this, 150);
                             this.muzzleFlash.rotation.z = Math.random() * Math.PI;
                         }
                         SoundGen.playShoot(this.mesh.position);
                     }
                 }
 
-                const tH = getVisualTerrainHeight(this.mesh.position.x, this.mesh.position.z);
                 let hitEnvironment = false;
 
-                if (this.mesh.position.y < tH + 2 || this.mesh.position.y < CONFIG.waterLevel - 5) {
+                if (this.mesh.position.y < CONFIG.waterLevel - 5) {
                     hitEnvironment = true;
+                } else if (this.mesh.position.y < getTerrainCellCeiling(this.mesh.position.x, this.mesh.position.z)) {
+                    // Only worth resolving the exact ground height when the plane is
+                    // low enough for the cell's tallest triangle to reach it.
+                    const tH = getVisualTerrainHeight(this.mesh.position.x, this.mesh.position.z);
+                    if (this.mesh.position.y < tH + 2) hitEnvironment = true;
                 }
 
                 if (!hitEnvironment && treeGridDim > 0) {
@@ -3937,7 +4948,7 @@
                             this.flashTimer = 0.1;
                             if (this.muzzleFlash) {
                                 this.muzzleFlash.material.opacity = 0.8;
-                                this.muzzleFlashLight.intensity = 150;
+                                claimMuzzleLight(this, 150);
                                 this.muzzleFlash.rotation.z = Math.random() * Math.PI;
                             }
                             _tempVec.set(0, 0, -4).applyMatrix4(this.mesh.matrixWorld);
@@ -3955,11 +4966,11 @@
                         this.flashTimer = 0;
                         if (this.muzzleFlash) {
                             this.muzzleFlash.material.opacity = 0;
-                            this.muzzleFlashLight.intensity = 0;
+                            claimMuzzleLight(this, 0);
                         }
                     } else if (this.muzzleFlash) {
                         this.muzzleFlash.material.opacity = 0.8;
-                        this.muzzleFlashLight.intensity = 150;
+                        claimMuzzleLight(this, 150);
                     }
                 }
 
@@ -4193,32 +5204,28 @@
                 simplex = new SimplexNoise(createSeededRNG(mapSeed));
             }
 
-            renderer = new THREE.WebGLRenderer({
-                antialias: true,
-                powerPreference: "high-performance"
-            });
-            renderer.setSize(window.innerWidth, window.innerHeight);
-            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-
-            renderer.shadowMap.enabled = true;
-            renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-            renderer.toneMapping = THREE.ACESFilmicToneMapping;
-            renderer.toneMappingExposure = 1.3;
+            renderer = createRenderer();
             document.body.appendChild(renderer.domElement);
 
             scene = new THREE.Scene();
             scene.background = new THREE.Color(0xeaf4fc);
             scene.fog = new THREE.FogExp2(0xeaf4fc, CONFIG.fogDensity);
             
+            // Container for in-flight projectiles. It sits at the origin with an
+            // identity transform, so a pooled mesh's world matrix is still just its
+            // local one - which is what Projectile.update() writes.
+            pooledRoot = new THREE.Group();
+            pooledRoot.matrixAutoUpdate = false;
+            pooledRoot.updateMatrix();
+            scene.add(pooledRoot);
+
             boxParticlePool = new ParticlePool(sharedExplosionGeo, 1500);
             sphereParticlePool = new ParticlePool(new THREE.IcosahedronGeometry(1, 0), 3000);
-            for (let i = 0; i < boxParticlePool.items.length; i++) scene.add(boxParticlePool.items[i].mesh);
-            for (let i = 0; i < sphereParticlePool.items.length; i++) scene.add(sphereParticlePool.items[i].mesh);
-            
+            scene.add(boxParticlePool.mesh);
+            scene.add(sphereParticlePool.mesh);
+
             for (let i = 0; i < MAX_PROJECTILES; i++) {
-                const proj = new Projectile();
-                scene.add(proj.mesh);
-                projectilePool.push(proj);
+                projectilePool.push(new Projectile());
             }
 
             const skyGeo = new THREE.SphereGeometry(25000, 32, 32);
@@ -4253,6 +5260,12 @@
                 side: THREE.BackSide
             });
             const skyDome = new THREE.Mesh(skyGeo, skyMat);
+            // The sky fills the screen behind everything else. Sorting it to the end
+            // of the opaque queue means terrain has already written depth by the time
+            // it draws, so most of its fragments are rejected before shading. It is
+            // opaque and depth-tested either way, so the result is unchanged.
+            skyDome.renderOrder = 1000;
+            freezeTransform(skyDome);
             scene.add(skyDome);
 
             const sunDirToOrigin = new THREE.Vector3(-800, -500, 800).normalize();
@@ -4276,8 +5289,16 @@
             sunGlow2.rotation.set(-0.3, 0.8, -0.2);
             sunGroup.add(sunGlow2);
 
+            freezeTransform(sunGroup);
             scene.add(sunGroup);
             scene.add(new THREE.HemisphereLight(0xfff8f0, 0x88bbdd, 1.0));
+
+            // Same colour, intensity range and 40-unit falloff the per-plane lights
+            // used. It stays in the scene for the whole match so NUM_POINT_LIGHTS is
+            // pinned at 1 and no material ever needs recompiling.
+            sharedMuzzleLight = new THREE.PointLight(0xffdd66, 0, 40);
+            sharedMuzzleLightOwner = null;
+            scene.add(sharedMuzzleLight);
 
             players = [];
             localPlayer = null;
@@ -4294,17 +5315,30 @@
             const me = localPlayer;
             if (me) document.getElementById('hud-name').innerText = me.name;
 
-            csm = new CSM({
-                maxFar: 14000, cascades: 3, mode: 'practical', parent: scene,
+            // Three 1024 cascades over 14000 units. With the nested-sphere fit this is
+            // ~5.5 units/texel in the near cascade, ~12 in the middle and ~33 in the far
+            // one - the same texel budget the cascaded setup here has always had, since
+            // the artefact being fixed was a coverage failure rather than a resolution
+            // one. Depth ranges, biases and the light standoff are all derived from those
+            // radii inside SunShadow, so shadowRes is the only knob that has to move if
+            // this ever needs to be sharper.
+            csm = new SunShadow({
+                maxFar: 14000, cascades: 3, parent: scene,
                 shadowMapSize: CONFIG.shadowRes, lightDirection: sunDirToOrigin,
                 camera: me.camera, lightIntensity: 3.2, lightColor: new THREE.Color(0xfffbdf),
-                lightNear: 1, lightFar: 25000, lightMargin: 4000
+                casterHeadroom: 8000
             });
-            csm.fade = true;
-            for (let i = 0; i < csm.lights.length; i++) {
-                csm.lights[i].shadow.bias = -0.0003;
-                csm.lights[i].shadow.normalBias = 1.0;
-            }
+
+            // Planes are built above, before csm exists, so the setupMaterial call that
+            // mid-game joiners get in addAIPlayer had nothing to run against here. Without
+            // USE_CSM a material takes three's stock directional path, which multiplies in
+            // every cascade's shadow map with no cascade selection - so a plane picks up
+            // shadow from cascades that do not cover it. Register them now that csm is up.
+            players.forEach(p => {
+                p.mesh.traverse(child => {
+                    if (child.isMesh && child.material) csm.setupMaterial(child.material);
+                });
+            });
 
             if (bakeStatus) bakeStatus.innerText = "SPINNING UP GENERATION THREAD...";
             await yieldToBrowser();
@@ -4513,17 +5547,14 @@ self.onmessage = function(e) {
     
     const MAX_PINE = CONFIG.treeCount;
     const MAX_DECID = CONFIG.treeCount;
-    const MAX_GRASS = 20000;
     const MAX_ROCK = 5000;
 
     const pineData = new Float32Array(MAX_PINE * 6);
     const decidData = new Float32Array(MAX_DECID * 6);
-    const grassData = new Float32Array(MAX_GRASS * 6);
     const rockData = new Float32Array(MAX_ROCK * 6);
 
     let pineCount = 0;
     let decidCount = 0;
-    let grassCount = 0;
     let rockCount = 0;
 
     let rngT = mapSeed;
@@ -4564,12 +5595,6 @@ self.onmessage = function(e) {
                             pineCount++;
                         }
                     }
-                } else if (clumpNoise < -0.1 && y < 250) {
-                    if (grassCount < MAX_GRASS) {
-                        grassData[grassCount*6] = x; grassData[grassCount*6+1] = y; grassData[grassCount*6+2] = z;
-                        grassData[grassCount*6+3] = scale * 1.5; grassData[grassCount*6+4] = scale * 1.5; grassData[grassCount*6+5] = rot;
-                        grassCount++;
-                    }
                 }
             }
         }
@@ -4580,7 +5605,6 @@ self.onmessage = function(e) {
     
     const pSlice = pineData.slice(0, pineCount * 6);
     const dSlice = decidData.slice(0, decidCount * 6);
-    const gSlice = grassData.slice(0, grassCount * 6);
     const rSlice = rockData.slice(0, rockCount * 6);
 
     self.postMessage({
@@ -4590,16 +5614,14 @@ self.onmessage = function(e) {
         colors: colors,
         pineData: pSlice,
         decidData: dSlice,
-        grassData: gSlice,
         rockData: rSlice,
-        pineCount, decidCount, grassCount, rockCount
+        pineCount, decidCount, rockCount
     }, [
-        posArray.buffer, 
-        normArray.buffer, 
+        posArray.buffer,
+        normArray.buffer,
         colors.buffer,
         pSlice.buffer,
         dSlice.buffer,
-        gSlice.buffer,
         rSlice.buffer
     ]);
 };
@@ -4612,21 +5634,20 @@ self.onmessage = function(e) {
                     if (e.data.status) {
                         if (bakeStatus) bakeStatus.innerText = e.data.status;
                     } else if (e.data.done) {
-                        const { positions, normals, colors, pineData, decidData, grassData, rockData, pineCount, decidCount, grassCount, rockCount } = e.data;
-                        
-                        const geometry = new THREE.BufferGeometry();
-                        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-                        geometry.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
-                        geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-                        
+                        const { positions, normals, colors, pineData, decidData, rockData, pineCount, decidCount, rockCount } = e.data;
+
                         buildTerrainGrid(positions);
 
-                        const terrainMaterial = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.9, metalness: 0.05, flatShading: true });
+                        // Lambert rather than Standard. The scene is lit by one
+                        // HemisphereLight plus SunShadow's directionals, with no env map and no
+                        // IBL, so the diffuse term is mathematically the same in both
+                        // models - what Standard adds here is a specular lobe that
+                        // roughness 0.9 / metalness 0.05 had already flattened to almost
+                        // nothing. Terrain is the largest fill-rate consumer in the frame,
+                        // so this drops the most expensive fragment shader in the scene.
+                        const terrainMaterial = new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true });
                         csm.setupMaterial(terrainMaterial);
-                        const terrain = new THREE.Mesh(geometry, terrainMaterial);
-                        terrain.receiveShadow = true;
-                        terrain.castShadow = true;
-                        scene.add(terrain);
+                        buildChunkedTerrain(positions, normals, colors, terrainMaterial);
 
                         if (bakeStatus) bakeStatus.innerText = "FLOODING OCEANS...";
                         await yieldToBrowser();
@@ -4658,10 +5679,17 @@ self.onmessage = function(e) {
 
                         const waterMat = new THREE.MeshStandardMaterial({
                             color: 0xffffff, transparent: true, opacity: 0.82,
-                            roughness: 0.2, metalness: 0.5, flatShading: true, vertexColors: true
+                            roughness: 0.2, metalness: 0.15, flatShading: true, vertexColors: true
                         });
-                        
+
+                        // csm.setupMaterial installs its own onBeforeCompile to bind the cascade
+                        // split uniform; it must run first so the wave hook below can wrap it
+                        // instead of clobbering it, otherwise the water never gets USE_CSM and
+                        // stays unshadowed regardless of receiveShadow.
+                        csm.setupMaterial(waterMat);
+                        const csmOnBeforeCompile = waterMat.onBeforeCompile;
                         waterMat.onBeforeCompile = (shader) => {
+                            csmOnBeforeCompile(shader);
                             shader.uniforms.time = { value: 0 };
                             waterMat.userData.shader = shader;
                             shader.vertexShader = `
@@ -4680,6 +5708,8 @@ self.onmessage = function(e) {
                         const mainWater = new THREE.Mesh(waterGeo, waterMat);
                         mainWater.rotation.x = -Math.PI / 2;
                         mainWater.position.y = CONFIG.waterLevel;
+                        mainWater.receiveShadow = true;
+                        freezeTransform(mainWater);
 
                         scene.add(mainWater);
                         waterMeshes.push(mainWater);
@@ -4689,6 +5719,7 @@ self.onmessage = function(e) {
                         const deepWater = new THREE.Mesh(deepWaterGeo, deepWaterMat);
                         deepWater.rotation.x = -Math.PI / 2;
                         deepWater.position.y = CONFIG.waterLevel - 15;
+                        freezeTransform(deepWater);
                         scene.add(deepWater);
 
                         if (bakeStatus) bakeStatus.innerText = "PLANTING FORESTS...";
@@ -4711,15 +5742,52 @@ self.onmessage = function(e) {
                         processTree(pineData, pineCount);
                         processTree(decidData, decidCount);
 
-                        const instancedMat = new THREE.MeshStandardMaterial({ vertexColors: true, flatShading: true, roughness: 0.9 });
+                        // Lambert for the same reason as the terrain - roughness 0.9 meant
+                        // the specular contribution was already negligible.
+                        const instancedMat = new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true });
                         csm.setupMaterial(instancedMat);
 
-                        function buildInstancedMeshFromData(geo, data, count, isTree) {
+                        // One InstancedMesh per prop type carries a single bounding
+                        // sphere spanning the whole map, so the frustum test is
+                        // all-or-nothing: every cascade redrew all 15,000 trees no
+                        // matter how little ground it covered. The instances are now
+                        // bucketed into the same grid the terrain uses, so the colour
+                        // pass and each cascade take only the cells they overlap. The
+                        // geometry object is shared by every cell - instanceMatrix
+                        // lives on the InstancedMesh, not on the geometry.
+                        function buildInstancedMeshFromData(geo, data, count, isTree, castShadow) {
                             if (count === 0) return;
                             geo.computeBoundingSphere();
-                            const mesh = new THREE.InstancedMesh(geo, instancedMat, count);
-                            mesh.castShadow = true;
-                            mesh.receiveShadow = true;
+
+                            const dim = WORLD_CHUNK_DIM;
+                            const cellSize = CONFIG.width / dim;
+                            const halfW = CONFIG.width / 2;
+                            const cellTotal = dim * dim;
+
+                            const counts = new Uint32Array(cellTotal);
+                            const cellOf = new Uint16Array(count);
+                            for (let i = 0; i < count; i++) {
+                                let gx = Math.floor((data[i*6] + halfW) / cellSize);
+                                let gz = Math.floor((data[i*6+2] + halfW) / cellSize);
+                                if (gx < 0) gx = 0; else if (gx >= dim) gx = dim - 1;
+                                if (gz < 0) gz = 0; else if (gz >= dim) gz = dim - 1;
+                                const cell = gz * dim + gx;
+                                cellOf[i] = cell;
+                                counts[cell]++;
+                            }
+
+                            const meshes = new Array(cellTotal);
+                            for (let c = 0; c < cellTotal; c++) {
+                                if (counts[c] === 0) continue;
+                                const m = new THREE.InstancedMesh(geo, instancedMat, counts[c]);
+                                m.castShadow = castShadow;
+                                m.receiveShadow = true;
+                                m.matrixAutoUpdate = false;
+                                m.updateMatrix();
+                                meshes[c] = m;
+                            }
+
+                            const cursors = new Uint32Array(cellTotal);
                             const dummy = new THREE.Object3D();
                             for(let i=0; i<count; i++) {
                                 const px = data[i*6], py = data[i*6+1], pz = data[i*6+2];
@@ -4729,27 +5797,31 @@ self.onmessage = function(e) {
                                 else dummy.scale.setScalar(sx);
                                 dummy.rotation.y = rot;
                                 dummy.updateMatrix();
-                                mesh.setMatrixAt(i, dummy.matrix);
+                                const c = cellOf[i];
+                                meshes[c].setMatrixAt(cursors[c]++, dummy.matrix);
                             }
-                            mesh.computeBoundingSphere();
-                            scene.add(mesh);
+
+                            for (let c = 0; c < cellTotal; c++) {
+                                if (!meshes[c]) continue;
+                                meshes[c].computeBoundingSphere();
+                                scene.add(meshes[c]);
+                            }
                         }
 
-                        if (bakeStatus) bakeStatus.innerText = "BUILDING MESHES (1/4)...";
+                        if (bakeStatus) bakeStatus.innerText = "BUILDING MESHES (1/3)...";
                         await yieldToBrowser();
-                        buildInstancedMeshFromData(createPineTreeMesh(), pineData, pineCount, true);
-                        
-                        if (bakeStatus) bakeStatus.innerText = "BUILDING MESHES (2/4)...";
+                        buildInstancedMeshFromData(createPineTreeMesh(), pineData, pineCount, true, true);
+
+                        if (bakeStatus) bakeStatus.innerText = "BUILDING MESHES (2/3)...";
                         await yieldToBrowser();
-                        buildInstancedMeshFromData(createDeciduousTreeMesh(), decidData, decidCount, true);
-                        
-                        if (bakeStatus) bakeStatus.innerText = "BUILDING MESHES (3/4)...";
+                        buildInstancedMeshFromData(createDeciduousTreeMesh(), decidData, decidCount, true, true);
+
+                        // Rocks are 4-unit icosahedra scattered on steep ground. Their
+                        // shadows are smaller than a cascade texel from any altitude the
+                        // game is played at, so they cost three extra passes for nothing.
+                        if (bakeStatus) bakeStatus.innerText = "BUILDING MESHES (3/3)...";
                         await yieldToBrowser();
-                        buildInstancedMeshFromData(createGrassMesh(), grassData, grassCount, false);
-                        
-                        if (bakeStatus) bakeStatus.innerText = "BUILDING MESHES (4/4)...";
-                        await yieldToBrowser();
-                        buildInstancedMeshFromData(createRockMesh(), rockData, rockCount, false);
+                        buildInstancedMeshFromData(createRockMesh(), rockData, rockCount, false, false);
 
                         resolve();
                         worker.terminate();
@@ -4774,7 +5846,10 @@ self.onmessage = function(e) {
             const maxOriginRadius = baseCloudGeo.boundingSphere.center.length() + baseCloudGeo.boundingSphere.radius;
             cloudMaxOriginRadiusSq = maxOriginRadius * maxOriginRadius;
 
-            const cloudMat = new THREE.MeshStandardMaterial({ color: 0xffffff, flatShading: true, roughness: 0.85, metalness: 0.0, side: THREE.DoubleSide });
+            // Lambert: metalness was already 0 and roughness 0.85, so nothing of the
+            // cloud's appearance depended on the PBR path. DoubleSide means every cloud
+            // fragment is potentially shaded twice, which makes the saving count double.
+            const cloudMat = new THREE.MeshLambertMaterial({ color: 0xffffff, flatShading: true, side: THREE.DoubleSide });
             cloudInstancedMesh = new THREE.InstancedMesh(baseCloudGeo, cloudMat, CLOUD_COUNT);
             cloudInstancedMesh.castShadow = true;
             cloudInstancedMesh.receiveShadow = true;
@@ -4800,6 +5875,8 @@ self.onmessage = function(e) {
                 dummy.updateMatrix();
                 cloudInstancedMesh.setMatrixAt(i, dummy.matrix);
             }
+            cloudInstancedMesh.matrixAutoUpdate = false;
+            cloudInstancedMesh.updateMatrix();
             scene.add(cloudInstancedMesh);
 
             for (let i = 0; i < players.length; i++) {
@@ -4823,14 +5900,16 @@ self.onmessage = function(e) {
             
             me.mesh.add(introWireframeMesh);
 
-            // Pre-render compilation phase to eliminate First-Shot Stutter
-            for (let i = 0; i < boxParticlePool.items.length; i++) boxParticlePool.items[i].mesh.visible = true;
-            for (let i = 0; i < sphereParticlePool.items.length; i++) sphereParticlePool.items[i].mesh.visible = true;
-            for (let i = 0; i < projectilePool.length; i++) projectilePool[i].mesh.visible = true;
+            // Pre-render compilation phase to eliminate First-Shot Stutter.
+            // Projectiles live outside the scene graph during play, so they are
+            // attached here for the duration of the warm-up and detached again below.
+            boxParticlePool.primeWarmUp(me.mesh.position);
+            sphereParticlePool.primeWarmUp(me.mesh.position);
+            for (let i = 0; i < projectilePool.length; i++) { projectilePool[i].mesh.visible = true; attachPooled(projectilePool[i].mesh); }
             for (let i = 0; i < players.length; i++) {
                 if (players[i].muzzleFlash) {
                     players[i].muzzleFlash.material.opacity = 1;
-                    players[i].muzzleFlashLight.intensity = 150;
+                    claimMuzzleLight(players[i], 150);
                 }
             }
 
@@ -4838,13 +5917,13 @@ self.onmessage = function(e) {
             warmUpAudioPipelines();
             await warmUpRenderer(me);
 
-            for (let i = 0; i < boxParticlePool.items.length; i++) boxParticlePool.items[i].mesh.visible = false;
-            for (let i = 0; i < sphereParticlePool.items.length; i++) sphereParticlePool.items[i].mesh.visible = false;
-            for (let i = 0; i < projectilePool.length; i++) projectilePool[i].mesh.visible = false;
+            boxParticlePool.endWarmUp();
+            sphereParticlePool.endWarmUp();
+            for (let i = 0; i < projectilePool.length; i++) { projectilePool[i].mesh.visible = false; detachPooled(projectilePool[i].mesh); }
             for (let i = 0; i < players.length; i++) {
                 if (players[i].muzzleFlash) {
                     players[i].muzzleFlash.material.opacity = 0;
-                    players[i].muzzleFlashLight.intensity = 0;
+                    claimMuzzleLight(players[i], 0);
                 }
             }
 
@@ -4903,6 +5982,25 @@ self.onmessage = function(e) {
 
             console.groupEnd();
             animate();
+        }
+
+        function createRenderer() {
+            const r = new THREE.WebGLRenderer({
+                antialias: true,
+                powerPreference: "high-performance",
+                // three.js allocates a stencil buffer by default. Nothing here uses
+                // one, and dropping it turns the MSAA depth attachment from D24S8
+                // into a plain depth buffer - straight bandwidth savings on an iGPU
+                // that shares memory with the CPU.
+                stencil: false
+            });
+            r.setSize(window.innerWidth, window.innerHeight);
+            r.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            r.shadowMap.enabled = true;
+            r.shadowMap.type = THREE.PCFSoftShadowMap;
+            r.toneMapping = THREE.ACESFilmicToneMapping;
+            r.toneMappingExposure = 1.3;
+            return r;
         }
 
         function handleKey(e, state) {
@@ -5077,12 +6175,22 @@ self.onmessage = function(e) {
                         rX *= ratio; rY *= ratio;
                     }
                     blipStyle.transform = `translate(-50%, -50%) translate(${70 + rX}px, ${70 + rY}px)`;
-                    blipStyle.display = 'block';
+                    // Re-assigning an unchanged display value still dirties style on
+                    // every frame; only write it on an actual transition.
+                    if (p._blipVisible !== true) {
+                        blipStyle.display = 'block';
+                        p._blipVisible = true;
+                    }
                 } else if (blipStyle) {
-                    blipStyle.display = 'none';
+                    if (p._blipVisible !== false) {
+                        blipStyle.display = 'none';
+                        p._blipVisible = false;
+                    }
                 }
             }
         }
+
+        let _nextListenerUpdate = 0;
 
         function animate() {
             requestAnimationFrame(animate);
@@ -5097,9 +6205,10 @@ self.onmessage = function(e) {
             }
 
             if (cloudInstancedMesh) {
+                const cloudDelta = Math.min(delta, 0.1);
                 for (let i = 0; i < cloudsData.length; i++) {
                     const c = cloudsData[i];
-                    c.x -= c.speed * delta;
+                    c.x -= c.speed * cloudDelta;
                     if (c.x < -CONFIG.width / 2) c.x = CONFIG.width / 2;
                     _cloudDummy.position.set(c.x, c.y, c.z);
                     _cloudDummy.scale.setScalar(c.scale);
@@ -5142,7 +6251,7 @@ self.onmessage = function(e) {
                         explosions.push(new Explosion(proj.mesh.position, 0xffff00));
                         SoundGen.playExplosion(proj.mesh.position);
                     }
-                    proj.isActive = false; proj.mesh.visible = false;
+                    proj.deactivate();
                     continue;
                 }
                 if (proj.ownerIdx === myPlayerIndex || proj.isLocalOrHostAI) {
@@ -5153,7 +6262,7 @@ self.onmessage = function(e) {
                             if (proj.mesh.position.distanceTo(p.mesh.position) < 12) {
                                 explosions.push(new Explosion(proj.mesh.position, 0xffaa00));
                                 SoundGen.playExplosion(proj.mesh.position);
-                                proj.isActive = false; proj.mesh.visible = false;
+                                proj.deactivate();
                                 const hitData = { type: 'HIT_EVENT', targetIdx: p.index, attackerIdx: proj.ownerIdx, dmg: 15 };
                                 if (isHost) {
                                     socket.emit('host_broadcast', { roomCode: myRoomCode, data: hitData });
@@ -5178,7 +6287,7 @@ self.onmessage = function(e) {
             for (let i = explosions.length - 1; i >= 0; i--) {
                 if (!explosions[i].update(timeScale)) {
                     explosions[i].dispose();
-                    explosions[i] = explosions[explosions.length - 1]; 
+                    explosions[i] = explosions[explosions.length - 1];
                     explosions.pop();
                 }
             }
@@ -5291,7 +6400,12 @@ self.onmessage = function(e) {
                     me.camera.lookAt(_tempDiff);
                 }
 
-                if (audioCtx.listener.positionX) {
+                // Same reasoning as the engine automation: the listener is driven with
+                // a 0.1s time constant, so a ~30Hz refresh is inaudible next to a
+                // per-frame one and removes nine scheduled events every frame.
+                const nowMs = performance.now();
+                if (audioCtx.listener.positionX && nowMs >= _nextListenerUpdate) {
+                    _nextListenerUpdate = nowMs + ENGINE_PARAM_INTERVAL;
                     const camPos = me.camera.position;
                     const camQuat = me.camera.quaternion;
                     _audioForward.set(0, 0, -1).applyQuaternion(camQuat);
@@ -5353,7 +6467,14 @@ self.onmessage = function(e) {
                 }
 
                 updateHUD(me);
+                updateSharedMuzzleLight();
                 me.camera.updateMatrixWorld();
+
+                // Particle instances are written last, once the camera for this frame
+                // is final, since their draw order depends on it.
+                boxParticlePool.commit(me.camera);
+                sphereParticlePool.commit(me.camera);
+
                 if (csm) csm.update();
 
                 renderer.render(scene, me.camera);
